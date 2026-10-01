@@ -15,8 +15,8 @@ type ReportResult = ReportRun['results'][number];
 type ReportSerialGroup = ReportRun['serialGroups'][number];
 type ReportSummary = ReportRun['summary'];
 
-/** Statuses that count as a failure of the run, the ones `--last-failed` runs again. */
-const FAILED_STATUSES = new Set<ReportResult['status']>(['failed', 'timed-out', 'interrupted']);
+/** Statuses that count as a failure of the run. `--last-failed` also runs an interrupted test again, but that one reached no verdict. */
+const FAILED_STATUSES = new Set<ReportResult['status']>(['failed', 'timed-out']);
 
 /**
  * A test per target and agent, whatever its `--repeat-each` run: the identity
@@ -30,13 +30,15 @@ function testKey(result: ReportResult): string {
 /**
  * The rerun's result with the run before's attempts in front of its own:
  * the same test's result there, and the further repeats the rerun has no
- * result of its own for. A pass after a failure there is flaky.
+ * result of its own for. A pass after a failure there is flaky; an
+ * interrupted rerun of a test that failed there keeps that failure.
  */
 function foldRerun(current: ReportResult, history: readonly ReportResult[]): ReportResult {
   if (history.length === 0) return current;
   const before = history.toSorted((a, b) => a.repeat - b.repeat);
   const attempts = [...before.flatMap((result) => result.attempts), ...current.attempts];
-  const status = current.status === 'passed' && before.some((result) => FAILED_STATUSES.has(result.status)) ? 'flaky' : current.status;
+  const failure = before.findLast((result) => FAILED_STATUSES.has(result.status));
+  const status = failure === undefined ? current.status : current.status === 'passed' ? 'flaky' : current.status === 'interrupted' ? failure.status : current.status;
   return { ...current, status, attempts };
 }
 
@@ -51,14 +53,16 @@ function foldGroup(current: ReportSerialGroup, before: ReportSerialGroup | undef
   return { ...current, attempts };
 }
 
-/** The counts the way the runner tallies them, over the folded results. */
+/** The counts the way the runner tallies them, over the folded results: the status counts are over the selected ones. */
 function summarize(results: readonly ReportResult[], base: ReportSummary): ReportSummary {
-  const summary: ReportSummary = { ...base, discovered: results.length, selected: 0, executed: 0, passed: 0, failed: 0, flaky: 0, skipped: 0 };
+  const summary: ReportSummary = { ...base, discovered: results.length, selected: 0, executed: 0, passed: 0, failed: 0, interrupted: 0, flaky: 0, skipped: 0 };
   for (const result of results) {
-    if (result.selected) summary.selected += 1;
     if (result.attempts.length > 0 || (result.serialGroupId !== undefined && result.status !== 'skipped')) summary.executed += 1;
+    if (!result.selected) continue;
+    summary.selected += 1;
     if (result.status === 'passed') summary.passed += 1;
     else if (result.status === 'flaky') summary.flaky += 1;
+    else if (result.status === 'interrupted') summary.interrupted += 1;
     else if (FAILED_STATUSES.has(result.status)) summary.failed += 1;
     else summary.skipped += 1;
   }

@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startFixtureApp, type FixtureApp } from '../helpers/fixture-app.ts';
@@ -890,6 +890,8 @@ test('never started either', async () => {});
       expect(interrupted.status).toBe('interrupted');
       expect(planned).toBe(3);
       expect(interrupted.report.run.summary.discovered).toBe(planned);
+      // The test the interrupt stopped reached no verdict: it is not a failure.
+      expect(interrupted.report.run.summary).toMatchObject({ selected: 3, passed: 0, failed: 0, interrupted: 1, skipped: 2 });
       for (const title of ['never started', 'never started either']) {
         const result = resultByTitle(interrupted, title);
         expect(result.status).toBe('skipped');
@@ -907,6 +909,86 @@ test('never started either', async () => {});
         ['never started', true, 'passed'],
         ['never started either', true, 'passed'],
       ]);
+      project.cleanup();
+    },
+    120_000,
+  );
+
+  it(
+    'an interrupt during a serial group retry keeps each member\'s verdict from the attempt before it',
+    async () => {
+      const project = createProject({});
+      const marker = path.join(project.dir, 'failed-once');
+      mkdirSync(path.join(project.dir, 'tests'), { recursive: true });
+      writeFileSync(
+        path.join(project.dir, 'tests', 'flow.e2e.ts'),
+        `import { existsSync, writeFileSync } from 'node:fs';
+import { test } from 'e2e';
+test.describe('flow', { serial: true }, () => {
+  test('first step', async () => {
+    if (!existsSync(${JSON.stringify(marker)})) {
+      writeFileSync(${JSON.stringify(marker)}, '');
+      throw new Error('first attempt fails');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 60_000));
+  });
+  test('second step', async () => {});
+});
+`,
+      );
+      const controller = new AbortController();
+      let starts = 0;
+      const outcome = await runExisting(project, {
+        appUrl: app.url,
+        config: { tests: 'tests/**/*.e2e.ts', retries: 1 },
+        runOptions: {
+          interruptSignal: controller.signal,
+          onEvent: (event) => {
+            // A serial member starts once per group attempt: the second start is the retry.
+            if (event.type === 'test-started' && event.title === 'flow > first step' && (starts += 1) === 2) controller.abort();
+          },
+        },
+      });
+      expect(outcome.exitCode).toBe(130);
+      expect(outcome.report.run.serialGroups[0]?.attempts.map((attempt) => attempt.status)).toEqual(['failed', 'interrupted']);
+      expect(resultByTitle(outcome, 'first step').status).toBe('failed');
+      expect(outcome.report.run.summary).toMatchObject({ failed: 1, interrupted: 0 });
+      assertValidReport(outcome.report);
+      project.cleanup();
+    },
+    120_000,
+  );
+
+  it(
+    'a forced interrupt still writes the junit and markdown files, so none of the previous run is left beside the report',
+    async () => {
+      const project = createProject({
+        'tests/sleeps.e2e.ts': `import { test } from 'e2e';
+test('sleeps until interrupted', async () => {
+  await new Promise((resolve) => setTimeout(resolve, 60_000));
+});
+`,
+      });
+      const output = path.join(project.dir, '.e2e');
+      mkdirSync(output, { recursive: true });
+      writeFileSync(path.join(output, 'summary.md'), '### 🟢 e2e: 3 passed\n');
+      writeFileSync(path.join(output, 'junit.xml'), '<testsuites tests="3"/>\n');
+      const force = new AbortController();
+      const outcome = await runExisting(project, {
+        appUrl: app.url,
+        config: { tests: 'tests/**/*.e2e.ts', reporters: ['junit', 'markdown'] },
+        runOptions: {
+          forceSignal: force.signal,
+          onEvent: (event) => {
+            if (event.type === 'test-started') force.abort();
+          },
+        },
+      });
+      expect(outcome.exitCode).toBe(130);
+      expect(outcome.report.run.summary).toMatchObject({ failed: 0, interrupted: 1 });
+      expect(readFileSync(path.join(output, 'summary.md'), 'utf8')).toMatch(/^### ⏹️ e2e: 1 interrupted\n/u);
+      expect(readFileSync(path.join(output, 'junit.xml'), 'utf8')).toContain('<skipped message="interrupted: ');
+      expect(existsSync(path.join(output, 'failures'))).toBe(false);
       project.cleanup();
     },
     120_000,
