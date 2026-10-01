@@ -15,6 +15,7 @@ import type { RawNodeData, RawObservedNode, SemanticMode, SemanticResult } from 
  * `mode.kind === 'node'` reads exactly one element for locator reads, in
  * the selector engine's task that found it (`read-selector.ts`,
  * `label-selector.ts`), so the element is always in its document.
+ * `mode.kind === 'hidden'` answers that one element's `states.hidden` alone.
  * `mode.kind === 'tree'` walks the subtree for one agent observation and
  * returns live element handles aligned with the flattened node list. The two
  * modes also project nodes differently; those differences are data (see
@@ -1243,7 +1244,8 @@ export const readSemanticsFunction = <Mode extends SemanticMode>(
   };
 
   // The conditional return type resolves per call site; inside the body the
-  // discriminant narrows the value but not the generic, hence the two casts.
+  // discriminant narrows the value but not the generic, hence the casts.
+  if (options.mode.kind === 'hidden') return isHidden(element) as SemanticResult<Mode>;
   if (options.mode.kind === 'node') {
     return describe(element) as SemanticResult<Mode>;
   }

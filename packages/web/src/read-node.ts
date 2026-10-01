@@ -84,6 +84,8 @@ interface RawObservation {
 
 export type SemanticMode =
   | { kind: 'node' }
+  /** The element's `states.hidden` alone, for the `visible` narrowing a selector engine applies. */
+  | { kind: 'hidden' }
   | {
       kind: 'tree';
       maxNodes: number;
@@ -100,7 +102,11 @@ export type SemanticMode =
     };
 
 /** Result of one read, selected by the mode discriminant. */
-export type SemanticResult<Mode extends SemanticMode> = Mode extends { kind: 'node' } ? RawNodeData : RawObservation;
+export type SemanticResult<Mode extends SemanticMode> = Mode extends { kind: 'node' }
+  ? RawNodeData
+  : Mode extends { kind: 'hidden' }
+    ? boolean
+    : RawObservation;
 
 /** Options for one document's tree walk. */
 interface TreeReadOptions {
