@@ -506,6 +506,44 @@ describe('renderMarkdownReport', () => {
     expect(renderMarkdownReport(page({ status: 'failed', results: [member] }))).toContain('**🔴 step two**  \n`tests/example.e2e.ts:3`\n\n**failed**\n');
   });
 
+  it('tells a serial member from the attempt that failed it when the interrupted retry skipped it', () => {
+    const member = named({ title: 'step two', status: 'failed', serialGroupId: 'g1' });
+    const memberRecord = (status: 'failed' | 'skipped') => ({
+      id: `m-${status}`,
+      index: 0,
+      testId: member.testId,
+      status,
+      startedAt: REPORT_AT,
+      durationMs: 40,
+      steps: status === 'failed' ? [step({ index: 0, label: 'tap Next', status: 'failed' })] : [],
+      ...(status === 'failed'
+        ? { error: { category: 'test' as const, code: 'ASSERTION_FAILED', message: 'nope', retryable: false } }
+        : { skip: { cause: 'serial-predecessor-failed' as const, reason: 'group attempt did not reach this member' } }),
+      secondaryErrors: [],
+    });
+    const group: ReportSerialGroup = {
+      id: 'g1',
+      serialId: 'g1',
+      declarationIndex: 0,
+      file: member.file,
+      source: member.source,
+      titlePath: ['group'],
+      targetId: 'web',
+      platform: 'web',
+      agent: 'default',
+      repeat: 0,
+      memberTestIds: [member.testId],
+      status: 'failed',
+      attempts: [
+        { ...attempt({ status: 'failed' }), members: [memberRecord('failed')] },
+        { ...attempt({ status: 'interrupted', error: { code: 'INTERRUPTED', message: 'run interrupted in phase body' } }), members: [memberRecord('skipped')] },
+      ],
+    };
+    const body = renderMarkdownReport(page({ status: 'interrupted', results: [member], serialGroups: [group] }));
+    expect(body).toContain('**ASSERTION_FAILED** at step 1 of 1: `screen.tap tap Next`');
+    expect(body).not.toContain('INTERRUPTED');
+  });
+
   it('counts zero failed attempts for a flaky test a foreign document gives one attempt, never a negative', () => {
     const oneAttempt = named({ title: 'odd', status: 'flaky', attempts: [attempt({ status: 'passed' })] });
     const body = renderMarkdownReport(page({ results: [oneAttempt] }));
