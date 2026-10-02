@@ -215,7 +215,7 @@ text, both `[]` at zero. Text is the rendered text, whitespace collapsed: on
 the web what `innerText` reads (`text-transform` applies, `display: none`
 drops out, `<br>` is a space); `toHaveText` reads the same. `isChecked()` is
 `false`, not an error, on a node with no checked state, so query checkable
-controls by role. `waitFor({ state?: 'visible' | 'hidden', timeout? })` waits
+controls by role. `waitFor({ state?: 'attached' | 'detached' | 'visible' | 'hidden', timeout? })` waits
 within `actionTimeout`, else `LOCATOR_NOT_FOUND`. For a value that has to
 settle use `expect`, not a read. Reading a password field's value or
 attributes is `POLICY_DENIED`, as is `toHaveAttribute` on one, negated too.
@@ -265,8 +265,8 @@ list or tests a RegExp. A failed matcher is `ASSERTION_FAILED`, exit code 1.
 
 Playwright's `{ checked: false }`, `{ enabled: false }`, `{ visible: false }`,
 and `{ attached: false }` flip their matchers, and `{ ignoreCase: true }`
-works on `toHaveText`, `toContainText`, `toHaveAccessibleName`, and
-`toHaveAttribute(name, value)`. Any other option, `indeterminate` or
+works on `toHaveText`, `toContainText`, `toHaveAccessibleName`,
+`toHaveAttribute(name, value)`, and `expect(browser).toHaveURL`. Any other option, `indeterminate` or
 `useInnerText` included, is `INVALID_ARGUMENT`, in JavaScript too.
 
 ## Sign-in sessions
