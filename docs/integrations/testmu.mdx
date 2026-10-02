@@ -136,9 +136,12 @@ either, the lease fails before anything starts, naming the missing one.
 agent-device's `testmu` runtime reads the credentials from the environment
 of the daemon that drives the sessions. The provider starts that daemon from
 the runner process, and agent-device starts a daemon with the process's own
-environment, so the provider copies `LT_USERNAME` and `LT_ACCESS_KEY` from
-the run's environment into the runner's `process.env` first, where the
-daemon it starts can read them.
+environment and takes no other, so while the provider calls the daemon (to
+allocate, heartbeat, or release a lease), it sets `LT_USERNAME` and
+`LT_ACCESS_KEY` from the run's environment in the runner's `process.env`,
+where a daemon the call starts reads them. Once no such call is running, it
+puts back the values `process.env` had before, so the credentials do not
+stay there for other child processes of a long-lived host.
 
 ## Install the app
 

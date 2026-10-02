@@ -40,9 +40,10 @@ export default {
 ```
 
 It authenticates with `LT_USERNAME` and `LT_ACCESS_KEY` from the run's
-environment, and copies both into the runner's `process.env`, where the
-agent-device daemon it starts reads them. Each worker slot leases one device from an agent-device daemon
-the provider starts for the run. Allocating the lease starts the TestMu AI
+environment. While it calls the agent-device daemon it starts for the run,
+it sets both in the runner's `process.env`, where that daemon reads them,
+and puts back the previous values afterwards. Each worker slot leases one
+device from that daemon. Allocating the lease starts the TestMu AI
 session, which installs `app`, so every slot is billed from the moment it is
 leased, even when no test runs on it. The lease is released when the run
 ends, which ends the session.

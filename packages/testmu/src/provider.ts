@@ -7,10 +7,10 @@
 
 import { readdir, rm, stat } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
-import type { DeviceLease, DeviceProvider, DeviceRequest } from '@e2e-dev/mobile';
+import type { DeviceLease, DeviceProvider, DeviceReleaseContext, DeviceRequest } from '@e2e-dev/mobile';
 import { createAgentDeviceClient } from 'agent-device';
 import { ConfigurationError, rejectUnknownKeys, type ProviderRecordContext, type ProviderRecording } from 'e2e/engine';
-import { shareWithDaemon, testmuCredentials } from './credentials.ts';
+import { optionalTestmuCredentials, testmuCredentials, withDaemonCredentials, type TestmuCredentials } from './credentials.ts';
 import { findSession, sessionVideoUrl, testmuApiEndpoint, type SessionRef } from './sessions.ts';
 
 /** agent-device's name for TestMu AI, as the lease provider and the tenant. */
@@ -131,6 +131,8 @@ interface LeaseScope {
 interface LeaseHandle {
   readonly stateDir: string;
   readonly scope: LeaseScope;
+  /** What a daemon the call starts authenticates with, when the caller has them. */
+  readonly credentials: TestmuCredentials | undefined;
 }
 
 /**
@@ -191,7 +193,7 @@ export function testmu(options: TestmuOptions): DeviceProvider {
     name: PROVIDER,
     async acquire(request: DeviceRequest): Promise<DeviceLease> {
       if (request.appPath !== undefined) throw new Error("TestMu AI installs the app from `app`; leave the target's `app.appPath` out");
-      shareWithDaemon(testmuCredentials(request.env));
+      const credentials = testmuCredentials(request.env);
       const baseDir = resolve(request.projectRoot, options.stateDir ?? DEFAULT_STATE_DIR);
       const stateDir = join(baseDir, request.runId);
       pruning ??= pruneEarlierRuns(baseDir, request.runId);
@@ -211,16 +213,18 @@ export function testmu(options: TestmuOptions): DeviceProvider {
         ...deviceFeatures,
       };
       // Not cancellable: the daemon may grant the lease after an interrupt, and only a lease this returns or releases is ever released.
-      const granted = await createAgentDeviceClient({ stateDir, session: `lease-${request.slot}` }).leases.allocate({
-        tenant: PROVIDER,
-        runId: request.runId,
-        leaseBackend,
-        leaseProvider: PROVIDER,
-        ttlMs: LEASE_TTL_MS,
-        ...selectors,
-      });
+      const granted = await withDaemonCredentials(credentials, () =>
+        createAgentDeviceClient({ stateDir, session: `lease-${request.slot}` }).leases.allocate({
+          tenant: PROVIDER,
+          runId: request.runId,
+          leaseBackend,
+          leaseProvider: PROVIDER,
+          ttlMs: LEASE_TTL_MS,
+          ...selectors,
+        }),
+      );
       const scope: LeaseScope = { tenant: granted.tenantId, runId: granted.runId, leaseId: granted.leaseId, leaseBackend, leaseProvider: PROVIDER };
-      heartbeats.set(scope.leaseId, keepAlive({ stateDir, scope }, request.log));
+      heartbeats.set(scope.leaseId, keepAlive({ stateDir, scope, credentials }, request.log));
       try {
         if (request.signal.aborted) throw new Error('cancelled');
         request.log(`lease ${scope.leaseId}: ${device}, ${request.platform} ${osVersion} (${deviceType}); session ${selectors.providerSessionName} started`);
@@ -228,15 +232,15 @@ export function testmu(options: TestmuOptions): DeviceProvider {
         return { id: scope.leaseId, client: { stateDir, ...scope, ...selectors } };
       } catch (cause) {
         // The engine releases only leases `acquire` returned.
-        const outcome = await release(scope.leaseId, { stateDir, scope }).then(
+        const outcome = await release(scope.leaseId, { stateDir, scope, credentials }).then(
           () => 'released it',
           (releaseCause: unknown) => `releasing it failed (${messageOf(releaseCause)})`,
         );
         throw new Error(`lease ${scope.leaseId} was not handed to the run: ${messageOf(cause)}; ${outcome}`, { cause });
       }
     },
-    async release(lease: DeviceLease): Promise<void> {
-      const handle = leaseHandle(lease);
+    async release(lease: DeviceLease, context: DeviceReleaseContext): Promise<void> {
+      const handle = leaseHandle(lease, optionalTestmuCredentials(context.env));
       if (handle === undefined) throw new Error(`lease ${lease.id} carries no agent-device lease scope to release`);
       await release(lease.id, handle);
     },
@@ -285,8 +289,8 @@ async function pruneEarlierRuns(baseDir: string, runId: string): Promise<void> {
 }
 
 /** Releases a lease through the daemon that granted it, which ends its TestMu AI session. A lease the daemon no longer knows counts as released. */
-async function releaseLease({ stateDir, scope }: LeaseHandle): Promise<void> {
-  await createAgentDeviceClient({ stateDir, session: 'release' }).leases.release(scope);
+async function releaseLease({ stateDir, scope, credentials }: LeaseHandle): Promise<void> {
+  await withDaemonCredentials(credentials, () => createAgentDeviceClient({ stateDir, session: 'release' }).leases.release(scope));
 }
 
 /**
@@ -296,11 +300,11 @@ async function releaseLease({ stateDir, scope }: LeaseHandle): Promise<void> {
  * the run holds it. A failed heartbeat is logged once and the next one tried;
  * it never fails the run.
  */
-function keepAlive({ stateDir, scope }: LeaseHandle, log: (line: string) => void): () => void {
+function keepAlive({ stateDir, scope, credentials }: LeaseHandle, log: (line: string) => void): () => void {
   const client = createAgentDeviceClient({ stateDir, session: 'heartbeat' });
   let warned = false;
   const timer = setInterval(() => {
-    client.leases.heartbeat({ ...scope, ttlMs: LEASE_TTL_MS }).catch((cause: unknown) => {
+    withDaemonCredentials(credentials, () => client.leases.heartbeat({ ...scope, ttlMs: LEASE_TTL_MS })).catch((cause: unknown) => {
       if (warned) return;
       warned = true;
       try {
@@ -330,7 +334,7 @@ function appSource(app: string, projectRoot: string): string {
 }
 
 /** The daemon and scope `acquire` put on a lease's `client`, when they are there. */
-function leaseHandle(lease: DeviceLease): LeaseHandle | undefined {
+function leaseHandle(lease: DeviceLease, credentials: TestmuCredentials | undefined): LeaseHandle | undefined {
   const client = lease.client as Record<string, unknown> | undefined;
   if (client === undefined) return undefined;
   const { stateDir, tenant, runId, leaseId, leaseBackend, leaseProvider } = client;
@@ -344,7 +348,7 @@ function leaseHandle(lease: DeviceLease): LeaseHandle | undefined {
   ) {
     return undefined;
   }
-  return { stateDir, scope: { tenant, runId, leaseId, leaseBackend, leaseProvider } };
+  return { stateDir, scope: { tenant, runId, leaseId, leaseBackend, leaseProvider }, credentials };
 }
 
 /** The build and session name `acquire` put on a lease's `client`, when they are there. */

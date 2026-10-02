@@ -20,6 +20,11 @@ const daemon = {
   calls: [] as ClientCall[],
   /** Runs inside `allocate`, before it answers. */
   onAllocate: undefined as (() => void) | undefined,
+  /** What each `allocate`, in order, waits for before it runs `onAllocate`. */
+  allocateWaits: [] as Promise<void>[],
+  /** Runs inside `heartbeat` and `release`, before they answer. */
+  onHeartbeat: undefined as (() => void) | undefined,
+  onRelease: undefined as (() => void) | undefined,
   allocateError: undefined as Error | undefined,
   /** Errors `release` answers with, in order, before it succeeds. */
   releaseErrors: [] as Error[],
@@ -32,18 +37,22 @@ vi.mock('agent-device', () => ({
     leases: {
       allocate: async (options: Record<string, unknown>) => {
         daemon.calls.push({ config, operation: 'allocate', options });
+        const wait = daemon.allocateWaits.shift();
+        if (wait !== undefined) await wait;
         daemon.onAllocate?.();
         if (daemon.allocateError !== undefined) throw daemon.allocateError;
         return { leaseId: `lease-${daemon.calls.length}`, tenantId: options['tenant'], runId: options['runId'], backend: options['leaseBackend'], leaseProvider: options['leaseProvider'] };
       },
       heartbeat: async (options: Record<string, unknown>) => {
         daemon.calls.push({ config, operation: 'heartbeat', options });
+        daemon.onHeartbeat?.();
         const error = daemon.heartbeatErrors.shift();
         if (error !== undefined) throw error;
         return { leaseId: options['leaseId'], tenantId: options['tenant'], runId: options['runId'], backend: options['leaseBackend'] };
       },
       release: async (options: Record<string, unknown>) => {
         daemon.calls.push({ config, operation: 'release', options });
+        daemon.onRelease?.();
         const error = daemon.releaseErrors.shift();
         if (error !== undefined) throw error;
         return { released: true };
@@ -58,7 +67,16 @@ const options: TestmuOptions = { device: 'Galaxy S22 Ultra 5G', osVersion: '14',
 const saved = { LT_USERNAME: process.env['LT_USERNAME'], LT_ACCESS_KEY: process.env['LT_ACCESS_KEY'] };
 
 beforeEach(() => {
-  Object.assign(daemon, { calls: [], onAllocate: undefined, allocateError: undefined, releaseErrors: [], heartbeatErrors: [] });
+  Object.assign(daemon, {
+    calls: [],
+    onAllocate: undefined,
+    allocateWaits: [],
+    onHeartbeat: undefined,
+    onRelease: undefined,
+    allocateError: undefined,
+    releaseErrors: [],
+    heartbeatErrors: [],
+  });
 });
 
 afterEach(() => {
@@ -91,6 +109,8 @@ function request(overrides: Partial<DeviceRequest> = {}): DeviceRequest & { line
 const context: DeviceReleaseContext = { runId: 'run-1', targetName: 'android', env, signal: new AbortController().signal, log: () => undefined };
 
 const operations = () => daemon.calls.map((call) => call.operation);
+
+const runnerCredentials = () => [process.env['LT_USERNAME'], process.env['LT_ACCESS_KEY']];
 
 const MINUTE = 60_000;
 
@@ -205,12 +225,60 @@ describe('testmu()', () => {
     expect(req.lines).toEqual(['lease lease-1: Galaxy S22 Ultra 5G, android 14 (virtual); session e2e-run-1-android-1 started']);
   });
 
-  it('shares the run\'s credentials with the daemon it starts', async () => {
+  it("shares the run's credentials with a daemon the allocation starts, and puts back the process's own after it", async () => {
     delete process.env['LT_USERNAME'];
     process.env['LT_ACCESS_KEY'] = 'stale';
-    daemon.onAllocate = () => expect([process.env['LT_USERNAME'], process.env['LT_ACCESS_KEY']]).toEqual(['ada', 'lt-key']);
+    daemon.onAllocate = () => expect(runnerCredentials()).toEqual(['ada', 'lt-key']);
     await testmu(options).acquire(request({ env: { LT_USERNAME: ' ada ', LT_ACCESS_KEY: 'lt-key' } }));
     expect(operations()).toEqual(['allocate']);
+    expect(runnerCredentials()).toEqual([undefined, 'stale']);
+  });
+
+  it('keeps the credentials in place until every allocation running at once has finished', async () => {
+    delete process.env['LT_USERNAME'];
+    delete process.env['LT_ACCESS_KEY'];
+    let open!: () => void;
+    daemon.allocateWaits = [Promise.resolve(), new Promise<void>((resolve) => (open = resolve))];
+    const seen: unknown[] = [];
+    daemon.onAllocate = () => seen.push(runnerCredentials());
+    const provider = testmu(options);
+    const first = provider.acquire(request({ slot: 0 }));
+    const second = provider.acquire(request({ slot: 1 }));
+    await first;
+    expect(runnerCredentials()).toEqual(['ada', 'lt-key']);
+    open();
+    await second;
+    expect(seen).toEqual([
+      ['ada', 'lt-key'],
+      ['ada', 'lt-key'],
+    ]);
+    expect(runnerCredentials()).toEqual([undefined, undefined]);
+  });
+
+  it('shares the credentials with a daemon a heartbeat or a release starts', async () => {
+    vi.useFakeTimers();
+    process.env['LT_USERNAME'] = 'host';
+    delete process.env['LT_ACCESS_KEY'];
+    const seen: unknown[] = [];
+    daemon.onHeartbeat = () => seen.push(['heartbeat', ...runnerCredentials()]);
+    daemon.onRelease = () => seen.push(['release', ...runnerCredentials()]);
+    const provider = testmu(options);
+    const lease = await provider.acquire(request());
+    await vi.advanceTimersByTimeAsync(2 * MINUTE);
+    expect(runnerCredentials()).toEqual(['host', undefined]);
+    await provider.release(lease, { ...context, env: { LT_USERNAME: 'grace', LT_ACCESS_KEY: 'other-key' } });
+    expect(seen).toEqual([
+      ['heartbeat', 'ada', 'lt-key'],
+      ['release', 'grace', 'other-key'],
+    ]);
+    expect(runnerCredentials()).toEqual(['host', undefined]);
+  });
+
+  it('releases a lease without credentials in the release environment, through the daemon already running', async () => {
+    const provider = testmu(options);
+    const lease = await provider.acquire(request());
+    await provider.release(lease, { ...context, env: {} });
+    expect(operations()).toEqual(['allocate', 'release']);
   });
 
   it.each([
