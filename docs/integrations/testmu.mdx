@@ -169,9 +169,19 @@ device a signed `.ipa`. Real devices need an agent-device release whose
 | `build`       | the run id      | Dashboard build the sessions are grouped under. |
 | `sessionName` | `e2e-<run id>-<target>-<slot>` | Name of each session on the dashboard. With more than one worker slot, `-<slot>` is appended, so every slot's session has its own name; slots count from 1. Give targets that share a `build` different names. |
 | `stateDir`    | `'.e2e/testmu'` | Directory for the agent-device daemon each run starts, relative to the directory of `e2e.config.ts`. Keep it out of version control. |
+| `orientation` | the device's    | `'portrait'` or `'landscape'`: the orientation the device starts in. |
+| `geoLocation` | TestMu AI's     | Country the device's IP address geolocates to, as a country code TestMu AI takes (`'US'`, `'FR'`). |
+| `timezone`    | the device's    | The device's time zone, as TestMu AI takes it (`'UTC+05:30'`). |
+| `language`    | the device's    | The device's language, as a language code (`'fr'`). |
+| `locale`      | the device's    | The device's locale (`'fr_FR'`). |
+| `appiumVersion` | TestMu AI's default | Appium version TestMu AI starts for the session (`'2.16.2'`). |
+
+The device features, `orientation` through `appiumVersion`, are set when the
+session starts and hold for the whole session; a test cannot change them.
 
 An option not in this table, a missing or empty `device`, `osVersion`, or
-`app`, or another `deviceType` fails the config load with `INVALID_CONFIG`.
+`app`, another `deviceType` or `orientation`, or an empty device feature
+fails the config load with `INVALID_CONFIG`.
 
 ## Write a test
 

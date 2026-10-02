@@ -33,6 +33,18 @@ const HEARTBEAT_INTERVAL_MS = 2 * 60_000;
 
 const DEVICE_TYPES: ReadonlySet<string> = new Set(['virtual', 'real']);
 
+const ORIENTATIONS: ReadonlySet<string> = new Set(['portrait', 'landscape']);
+
+/** Each device-feature option and the agent-device lease key it is allocated under. */
+const DEVICE_FEATURES = {
+  orientation: 'providerDeviceOrientation',
+  geoLocation: 'providerGeoLocation',
+  timezone: 'providerTimezone',
+  language: 'providerLanguage',
+  locale: 'providerLocale',
+  appiumVersion: 'providerAppiumVersion',
+} as const satisfies Partial<Record<keyof TestmuOptions, string>>;
+
 /** Every option `testmu()` takes, kept equal to `TestmuOptions` by the compiler. */
 const OPTION_KEYS: readonly string[] = Object.keys({
   device: true,
@@ -43,6 +55,12 @@ const OPTION_KEYS: readonly string[] = Object.keys({
   build: true,
   sessionName: true,
   stateDir: true,
+  orientation: true,
+  geoLocation: true,
+  timezone: true,
+  language: true,
+  locale: true,
+  appiumVersion: true,
 } satisfies Record<keyof TestmuOptions, true>);
 
 /** What `testmu()` takes: the device, its OS version, and the app TestMu AI installs on it. */
@@ -71,6 +89,18 @@ export interface TestmuOptions {
   readonly sessionName?: string | undefined;
   /** Directory for the agent-device daemon each run starts, relative to the project root. Defaults to `.e2e/testmu`. */
   readonly stateDir?: string | undefined;
+  /** Orientation the device starts in; absent, the device's default. */
+  readonly orientation?: 'portrait' | 'landscape' | undefined;
+  /** Country the device's IP geolocates to, as a code TestMu AI takes: `US`, `FR`. */
+  readonly geoLocation?: string | undefined;
+  /** The device's time zone, as TestMu AI takes it: `UTC+05:30`. */
+  readonly timezone?: string | undefined;
+  /** The device's language, as a language code: `fr`. */
+  readonly language?: string | undefined;
+  /** The device's locale: `fr_FR`. */
+  readonly locale?: string | undefined;
+  /** Appium version TestMu AI starts for the session; absent, its default for the device. */
+  readonly appiumVersion?: string | undefined;
 }
 
 type LeaseBackend = 'ios-instance' | 'android-instance';
@@ -112,6 +142,18 @@ export function testmu(options: TestmuOptions): DeviceProvider {
   if (!DEVICE_TYPES.has(deviceType)) {
     throw new ConfigurationError('INVALID_CONFIG', `testmu: \`deviceType\` must be 'virtual' or 'real', not ${JSON.stringify(deviceType)}`);
   }
+  const deviceFeatures: Record<string, string> = {};
+  for (const [key, leaseKey] of Object.entries(DEVICE_FEATURES)) {
+    const value: unknown = options[key as keyof typeof DEVICE_FEATURES];
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || value.trim() === '') {
+      throw new ConfigurationError('INVALID_CONFIG', `testmu: \`${key}\` must be a non-empty string`);
+    }
+    if (key === 'orientation' && !ORIENTATIONS.has(value)) {
+      throw new ConfigurationError('INVALID_CONFIG', `testmu: \`orientation\` must be 'portrait' or 'landscape', not ${JSON.stringify(value)}`);
+    }
+    deviceFeatures[leaseKey] = value;
+  }
   const { device, osVersion, app, project, build, sessionName } = options;
   /** One release per lease, shared by every caller: the engine's, and `acquire`'s own after a failure. */
   const releases = new Map<string, Promise<void>>();
@@ -147,6 +189,7 @@ export function testmu(options: TestmuOptions): DeviceProvider {
         providerProject: project ?? DEFAULT_PROJECT,
         providerBuild: build ?? request.runId,
         providerSessionName: slotSessionName(sessionName, request),
+        ...deviceFeatures,
       };
       // Not cancellable: the daemon may grant the lease after an interrupt, and only a lease this returns or releases is ever released.
       const granted = await createAgentDeviceClient({ stateDir, session: `lease-${request.slot}` }).leases.allocate({

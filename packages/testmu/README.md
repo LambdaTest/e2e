@@ -56,6 +56,9 @@ ends, which ends the session.
   (default `e2e-<run id>-<target>-<slot>`) label the sessions on the
   dashboard. A given `sessionName` gets `-<slot>` appended when the target
   has more than one worker slot, so each slot's session has its own name.
+- `orientation` (`'portrait'` or `'landscape'`), `geoLocation`, `timezone`,
+  `language`, `locale`, and `appiumVersion` set up the device when the
+  session starts.
 - `stateDir` (default `.e2e/testmu`) holds each run's daemon.
 
 Sessions run over TestMu AI's Appium hub, so agent-device's device settings,

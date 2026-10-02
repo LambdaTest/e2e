@@ -154,6 +154,20 @@ describe('testmu()', () => {
     expect(daemon.calls.map((call) => call.options['providerSessionName'])).toEqual(['e2e-run-7-pixel-1', 'e2e-run-7-pixel-3', 'checkout-3', 'checkout']);
   });
 
+  it('passes the device features to the allocation and the worker under agent-device\'s keys', async () => {
+    const lease = await testmu({ ...options, orientation: 'landscape', geoLocation: 'US', timezone: 'UTC+05:30', language: 'fr', locale: 'fr_FR', appiumVersion: '2.16.2' }).acquire(request());
+    const features = {
+      providerDeviceOrientation: 'landscape',
+      providerGeoLocation: 'US',
+      providerTimezone: 'UTC+05:30',
+      providerLanguage: 'fr',
+      providerLocale: 'fr_FR',
+      providerAppiumVersion: '2.16.2',
+    };
+    expect(daemon.calls[0]?.options).toMatchObject(features);
+    expect(lease.client).toMatchObject(features);
+  });
+
   it('resolves a local build against the project root, never the working directory', async () => {
     await testmu({ ...options, app: 'build/app.apk' }).acquire(request());
     expect(daemon.calls[0]?.options['providerApp']).toBe(join(ROOT, 'build', 'app.apk'));
@@ -360,6 +374,17 @@ describe('testmu()', () => {
     expect(() => testmu({ ...options, [key]: ' ' })).toThrow(expect.objectContaining({ code: 'INVALID_CONFIG', message: `testmu: \`${key}\` is required, as a non-empty string` }));
     const { [key]: _, ...rest } = options;
     expect(() => testmu(rest as TestmuOptions)).toThrow(expect.objectContaining({ code: 'INVALID_CONFIG' }));
+  });
+
+  it('refuses an orientation other than portrait or landscape', () => {
+    expect(() => testmu({ ...options, orientation: 'PORTRAIT' as 'portrait' })).toThrow(
+      expect.objectContaining({ code: 'INVALID_CONFIG', message: 'testmu: `orientation` must be \'portrait\' or \'landscape\', not "PORTRAIT"' }),
+    );
+  });
+
+  it.each(['geoLocation', 'timezone', 'language', 'locale', 'appiumVersion'] as const)('refuses an empty or non-string `%s` with INVALID_CONFIG', (key) => {
+    expect(() => testmu({ ...options, [key]: ' ' })).toThrow(expect.objectContaining({ code: 'INVALID_CONFIG', message: `testmu: \`${key}\` must be a non-empty string` }));
+    expect(() => testmu({ ...options, [key]: 2 } as unknown as TestmuOptions)).toThrow(expect.objectContaining({ code: 'INVALID_CONFIG' }));
   });
 
   it('refuses a device type other than virtual or real', () => {
