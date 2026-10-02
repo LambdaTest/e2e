@@ -1,0 +1,5 @@
+---
+"@e2e-dev/testmu": minor
+---
+
+`@e2e-dev/testmu`: `mobile({ device: testmu({ device, osVersion, app }) })` runs a mobile target on TestMu AI (formerly LambdaTest) Android emulators, iOS simulators, and real devices (`deviceType: 'real'`), one per worker slot, through agent-device's `testmu` cloud provider. Each slot leases a device from an agent-device daemon the provider starts for the run under `stateDir` (default `.e2e/testmu`); the worker's first command starts the TestMu AI session, which installs `app` (an `lt://` id, an `https` URL, or a local path), and releasing the lease ends it. It reads `LT_USERNAME` and `LT_ACCESS_KEY` from the run's environment and fails the lease before starting anything when either is missing, groups sessions on the dashboard under `project` (default `e2e`) and `build` (default the run id), releases a lease it allocated when the run was interrupted, and releases each lease once. It needs an agent-device that includes the `testmu` provider, which no published release does yet, with `@e2e-dev/mobile`'s agent-device overridden to the same version; `agent-device` and `@e2e-dev/mobile` are its peers.
