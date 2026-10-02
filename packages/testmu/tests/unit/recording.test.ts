@@ -209,4 +209,13 @@ describe('testmu().record()', () => {
     await expect(record(lease, context({ env: { ...env, TESTMU_API_ENDPOINT: 'mobile-api' } }))).rejects.toThrow('TESTMU_API_ENDPOINT is not an http(s) URL');
     expect(api.calls).toEqual([]);
   });
+
+  it('refuses an endpoint carrying credentials, without repeating them', async () => {
+    for (const endpoint of ['https://ada:lt-key@mobile-api.lambdatest.com/mobile-automation/api/v1', 'https://lt-key@mobile-api.lambdatest.com']) {
+      const error = await failure(record(lease, context({ env: { ...env, TESTMU_API_ENDPOINT: endpoint } })));
+      expect(error).toMatchObject({ code: 'INVALID_CONFIG', message: 'TESTMU_API_ENDPOINT must not carry a username or password; set LT_USERNAME and LT_ACCESS_KEY instead' });
+      expect(JSON.stringify(error, Object.getOwnPropertyNames(error))).not.toContain('lt-key');
+    }
+    expect(api.calls).toEqual([]);
+  });
 });

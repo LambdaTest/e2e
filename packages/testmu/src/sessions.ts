@@ -5,6 +5,7 @@
  * its video.
  */
 
+import { ConfigurationError } from 'e2e/engine';
 import type { TestmuCredentials } from './credentials.ts';
 
 /** The API's base, as agent-device's `TESTMU_API_ENDPOINT` sets it. */
@@ -24,11 +25,20 @@ export interface SessionRef {
   readonly sessionName: string;
 }
 
-/** The sessions API at `TESTMU_API_ENDPOINT` from the run's environment, else TestMu AI's own; throws when the override is not an http(s) URL. */
+/**
+ * The sessions API at `TESTMU_API_ENDPOINT` from the run's environment, else
+ * TestMu AI's own. Throws, without repeating the value, when the override is
+ * not an http(s) URL or carries a username or password, which a failed
+ * request would otherwise put in its error message.
+ */
 export function testmuApiEndpoint(env: Readonly<Record<string, string | undefined>>): string {
   const override = env['TESTMU_API_ENDPOINT']?.trim();
   if (override === undefined || override === '') return DEFAULT_API_ENDPOINT;
-  if (!URL.canParse(override) || !/^https?:$/.test(new URL(override).protocol)) throw new Error('TESTMU_API_ENDPOINT is not an http(s) URL');
+  if (!URL.canParse(override) || !/^https?:$/.test(new URL(override).protocol)) throw new ConfigurationError('INVALID_CONFIG', 'TESTMU_API_ENDPOINT is not an http(s) URL');
+  const url = new URL(override);
+  if (url.username !== '' || url.password !== '') {
+    throw new ConfigurationError('INVALID_CONFIG', 'TESTMU_API_ENDPOINT must not carry a username or password; set LT_USERNAME and LT_ACCESS_KEY instead');
+  }
   return override.replace(/\/+$/, '');
 }
 
