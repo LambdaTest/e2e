@@ -211,6 +211,10 @@ TestMu AI dashboard, under the project and build the options name.
 
 - Starts one agent-device daemon per run under `stateDir/<run id>` and
   allocates a `testmu` lease from it for each worker slot.
+- Keeps each lease alive while the run holds it. A lease asks for
+  agent-device's longest inactivity window, 10 minutes, and the provider
+  heartbeats it every 2 minutes, so a session that takes long to start keeps
+  its lease. A failed heartbeat is logged once and does not fail the run.
 - Hands the worker the lease scope and the device selectors as agent-device
   client configuration. The worker's first command starts the TestMu AI
   session from them, which installs `app`.

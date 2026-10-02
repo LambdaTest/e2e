@@ -20,6 +20,16 @@ const DEFAULT_STATE_DIR = '.e2e/testmu';
 /** The dashboard project sessions are grouped under when `project` is absent. */
 const DEFAULT_PROJECT = 'e2e';
 
+/**
+ * The inactivity window each lease asks for, agent-device's longest. Its
+ * 60-second default lapses while the worker's first command uploads the app
+ * and starts the session, which can take longer on an iOS simulator.
+ */
+const LEASE_TTL_MS = 10 * 60_000;
+
+/** How often the runner heartbeats each lease it holds, well inside `LEASE_TTL_MS`. */
+const HEARTBEAT_INTERVAL_MS = 2 * 60_000;
+
 const DEVICE_TYPES: ReadonlySet<string> = new Set(['virtual', 'real']);
 
 /** Every option `testmu()` takes, kept equal to `TestmuOptions` by the compiler. */
@@ -99,7 +109,11 @@ export function testmu(options: TestmuOptions): DeviceProvider {
   const { device, osVersion, app, project, build, sessionName } = options;
   /** One release per lease, shared by every caller: the engine's, and `acquire`'s own after a failure. */
   const releases = new Map<string, Promise<void>>();
+  /** Stops each held lease's heartbeat, by lease id. */
+  const heartbeats = new Map<string, () => void>();
   const release = (id: string, handle: LeaseHandle): Promise<void> => {
+    heartbeats.get(id)?.();
+    heartbeats.delete(id);
     let pending = releases.get(id);
     if (pending === undefined) {
       pending = releaseLease(handle);
@@ -134,9 +148,11 @@ export function testmu(options: TestmuOptions): DeviceProvider {
         runId: request.runId,
         leaseBackend,
         leaseProvider: PROVIDER,
+        ttlMs: LEASE_TTL_MS,
         ...selectors,
       });
       const scope: LeaseScope = { tenant: granted.tenantId, runId: granted.runId, leaseId: granted.leaseId, leaseBackend, leaseProvider: PROVIDER };
+      heartbeats.set(scope.leaseId, keepAlive({ stateDir, scope }, request.log));
       try {
         if (request.signal.aborted) throw new Error('cancelled');
         request.log(`lease ${scope.leaseId}: ${device}, ${request.platform} ${osVersion} (${deviceType}); the session starts on the first command`);
@@ -162,6 +178,30 @@ export function testmu(options: TestmuOptions): DeviceProvider {
 /** Releases a lease through the daemon that granted it, which ends its TestMu AI session. A lease the daemon no longer knows counts as released. */
 async function releaseLease({ stateDir, scope }: LeaseHandle): Promise<void> {
   await createAgentDeviceClient({ stateDir, session: 'release' }).leases.release(scope);
+}
+
+/**
+ * Heartbeats a lease until the returned function is called. A command still
+ * running does not keep its lease alive, so without this a lease can lapse
+ * while the worker's first command is starting the session. A failed
+ * heartbeat is logged once and the next one tried; it never fails the run.
+ */
+function keepAlive({ stateDir, scope }: LeaseHandle, log: (line: string) => void): () => void {
+  const client = createAgentDeviceClient({ stateDir, session: 'heartbeat' });
+  let warned = false;
+  const timer = setInterval(() => {
+    client.leases.heartbeat({ ...scope, ttlMs: LEASE_TTL_MS }).catch((cause: unknown) => {
+      if (warned) return;
+      warned = true;
+      try {
+        log(`lease ${scope.leaseId}: heartbeat failed (${messageOf(cause)}); agent-device ends the lease after ${LEASE_TTL_MS / 60_000} minutes without one`);
+      } catch {
+        // The run's log may be closed by now.
+      }
+    });
+  }, HEARTBEAT_INTERVAL_MS);
+  timer.unref();
+  return () => clearInterval(timer);
 }
 
 /** `app` as the daemon reads it: an `lt://` id or URL as written, a local path resolved against the project root, never the daemon's working directory. */

@@ -1,7 +1,8 @@
 /**
  * `testmu()` against a stubbed agent-device client: the options it refuses,
  * the lease it allocates and hands the worker, the credentials it reads and
- * shares with the daemon, and the release on every exit path.
+ * shares with the daemon, the heartbeat that keeps it alive, and the release
+ * on every exit path.
  */
 
 import { join } from 'node:path';
@@ -11,7 +12,7 @@ import { testmu, type TestmuOptions } from '../../src/index.ts';
 
 interface ClientCall {
   readonly config: Record<string, unknown>;
-  readonly operation: 'allocate' | 'release';
+  readonly operation: 'allocate' | 'heartbeat' | 'release';
   readonly options: Record<string, unknown>;
 }
 
@@ -22,6 +23,8 @@ const daemon = {
   allocateError: undefined as Error | undefined,
   /** Errors `release` answers with, in order, before it succeeds. */
   releaseErrors: [] as Error[],
+  /** Errors `heartbeat` answers with, in order, before it succeeds. */
+  heartbeatErrors: [] as Error[],
 };
 
 vi.mock('agent-device', () => ({
@@ -32,6 +35,12 @@ vi.mock('agent-device', () => ({
         daemon.onAllocate?.();
         if (daemon.allocateError !== undefined) throw daemon.allocateError;
         return { leaseId: `lease-${daemon.calls.length}`, tenantId: options['tenant'], runId: options['runId'], backend: options['leaseBackend'], leaseProvider: options['leaseProvider'] };
+      },
+      heartbeat: async (options: Record<string, unknown>) => {
+        daemon.calls.push({ config, operation: 'heartbeat', options });
+        const error = daemon.heartbeatErrors.shift();
+        if (error !== undefined) throw error;
+        return { leaseId: options['leaseId'], tenantId: options['tenant'], runId: options['runId'], backend: options['leaseBackend'] };
       },
       release: async (options: Record<string, unknown>) => {
         daemon.calls.push({ config, operation: 'release', options });
@@ -49,10 +58,11 @@ const options: TestmuOptions = { device: 'Galaxy S22 Ultra 5G', osVersion: '14',
 const saved = { LT_USERNAME: process.env['LT_USERNAME'], LT_ACCESS_KEY: process.env['LT_ACCESS_KEY'] };
 
 beforeEach(() => {
-  Object.assign(daemon, { calls: [], onAllocate: undefined, allocateError: undefined, releaseErrors: [] });
+  Object.assign(daemon, { calls: [], onAllocate: undefined, allocateError: undefined, releaseErrors: [], heartbeatErrors: [] });
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   for (const [name, value] of Object.entries(saved)) {
     if (value === undefined) delete process.env[name];
     else process.env[name] = value;
@@ -82,6 +92,8 @@ const context: DeviceReleaseContext = { runId: 'run-1', targetName: 'android', e
 
 const operations = () => daemon.calls.map((call) => call.operation);
 
+const MINUTE = 60_000;
+
 describe('testmu()', () => {
   it('is a device provider named testmu that leaves recording to agent-device', () => {
     const provider = testmu(options);
@@ -108,6 +120,7 @@ describe('testmu()', () => {
           providerDeviceType: 'virtual',
           providerProject: 'e2e',
           providerBuild: 'run-1',
+          ttlMs: 10 * MINUTE,
         },
       },
     ]);
@@ -264,6 +277,68 @@ describe('testmu()', () => {
   it('refuses to release a lease without an agent-device scope', async () => {
     await expect(testmu(options).release({ id: 'other', client: { stateDir: '/tmp/x' } }, context)).rejects.toThrow('lease other carries no agent-device lease scope to release');
     expect(daemon.calls).toEqual([]);
+  });
+
+  it('heartbeats each lease it holds every two minutes, asking for the longest lease, until it is released', async () => {
+    vi.useFakeTimers();
+    const provider = testmu(options);
+    const lease = await provider.acquire(request());
+    await vi.advanceTimersByTimeAsync(2 * MINUTE - 1);
+    expect(operations()).toEqual(['allocate']);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(daemon.calls[1]).toEqual({
+      config: { stateDir: join(ROOT, '.e2e', 'testmu', 'run-1'), session: 'heartbeat' },
+      operation: 'heartbeat',
+      options: { tenant: 'testmu', runId: 'run-1', leaseId: 'lease-1', leaseBackend: 'android-instance', leaseProvider: 'testmu', ttlMs: 10 * MINUTE },
+    });
+    await vi.advanceTimersByTimeAsync(2 * MINUTE);
+    expect(operations()).toEqual(['allocate', 'heartbeat', 'heartbeat']);
+    await provider.release(lease, context);
+    await vi.advanceTimersByTimeAsync(10 * MINUTE);
+    expect(operations()).toEqual(['allocate', 'heartbeat', 'heartbeat', 'release']);
+  });
+
+  it('stops heartbeating a lease it released because handing it over failed', async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    daemon.onAllocate = () => controller.abort();
+    await expect(testmu(options).acquire(request({ signal: controller.signal }))).rejects.toThrow('was not handed to the run');
+    await vi.advanceTimersByTimeAsync(10 * MINUTE);
+    expect(operations()).toEqual(['allocate', 'release']);
+  });
+
+  it('heartbeats nothing when the allocation failed', async () => {
+    vi.useFakeTimers();
+    daemon.allocateError = new Error('no capacity');
+    await expect(testmu(options).acquire(request())).rejects.toThrow('no capacity');
+    await vi.advanceTimersByTimeAsync(10 * MINUTE);
+    expect(operations()).toEqual(['allocate']);
+  });
+
+  it('logs the first failed heartbeat and keeps beating, without failing the run', async () => {
+    vi.useFakeTimers();
+    daemon.heartbeatErrors = [new Error('Lease is not active'), new Error('daemon gone')];
+    const req = request();
+    await testmu(options).acquire(req);
+    await vi.advanceTimersByTimeAsync(6 * MINUTE);
+    expect(operations()).toEqual(['allocate', 'heartbeat', 'heartbeat', 'heartbeat']);
+    expect(req.lines.slice(1)).toEqual(['lease lease-1: heartbeat failed (Lease is not active); agent-device ends the lease after 10 minutes without one']);
+  });
+
+  it('survives a failed heartbeat when the run\'s log is closed', async () => {
+    vi.useFakeTimers();
+    daemon.heartbeatErrors = [new Error('daemon gone')];
+    let closed = false;
+    await testmu(options).acquire(
+      request({
+        log: () => {
+          if (closed) throw new Error('reporter closed');
+        },
+      }),
+    );
+    closed = true;
+    await vi.advanceTimersByTimeAsync(4 * MINUTE);
+    expect(operations()).toEqual(['allocate', 'heartbeat', 'heartbeat']);
   });
 
   it('rejects an option it does not take with INVALID_CONFIG, naming the nearest one', () => {
