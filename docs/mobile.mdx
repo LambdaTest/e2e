@@ -187,8 +187,9 @@ names instead of the local one, so any service that runs an agent-device
 daemon next to a simulator, an emulator, or a physical device works. Nothing
 in the framework knows a vendor: for [EAS Simulators](/integrations/eas),
 `easSimulators()` from `@e2e-dev/eas` is the provider, for
-[TestMu AI](/integrations/testmu) `testmu()` from `@e2e-dev/testmu`, and for
-any other service a provider is a few dozen lines in your project.
+[TestMu AI](/integrations/testmu), `testmu()` from `@e2e-dev/testmu` is the
+provider, and for any other service a provider is a few dozen lines in your
+project.
 
 ```ts
 export interface DeviceProvider {

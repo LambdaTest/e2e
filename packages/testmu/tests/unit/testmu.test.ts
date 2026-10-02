@@ -2,12 +2,14 @@
  * `testmu()` against a stubbed agent-device client: the options it refuses,
  * the lease it allocates and hands the worker, the credentials it reads and
  * shares with the daemon, the heartbeat that keeps it alive, and the release
- * on every exit path.
+ * on every exit path. `recording.test.ts` covers `record`.
  */
 
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DeviceLease, DeviceReleaseContext, DeviceRequest } from '@e2e-dev/mobile';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { testmu, type TestmuOptions } from '../../src/index.ts';
 
 interface ClientCall {
@@ -20,6 +22,11 @@ const daemon = {
   calls: [] as ClientCall[],
   /** Runs inside `allocate`, before it answers. */
   onAllocate: undefined as (() => void) | undefined,
+  /** What an `allocate` from a client of that session waits for, once, before it runs `onAllocate`. */
+  allocateGates: {} as Record<string, Promise<void>>,
+  /** Runs inside `heartbeat` and `release`, before they answer. */
+  onHeartbeat: undefined as (() => void) | undefined,
+  onRelease: undefined as (() => void) | undefined,
   allocateError: undefined as Error | undefined,
   /** Errors `release` answers with, in order, before it succeeds. */
   releaseErrors: [] as Error[],
@@ -32,18 +39,23 @@ vi.mock('agent-device', () => ({
     leases: {
       allocate: async (options: Record<string, unknown>) => {
         daemon.calls.push({ config, operation: 'allocate', options });
+        const gate = daemon.allocateGates[String(config['session'])];
+        delete daemon.allocateGates[String(config['session'])];
+        if (gate !== undefined) await gate;
         daemon.onAllocate?.();
         if (daemon.allocateError !== undefined) throw daemon.allocateError;
         return { leaseId: `lease-${daemon.calls.length}`, tenantId: options['tenant'], runId: options['runId'], backend: options['leaseBackend'], leaseProvider: options['leaseProvider'] };
       },
       heartbeat: async (options: Record<string, unknown>) => {
         daemon.calls.push({ config, operation: 'heartbeat', options });
+        daemon.onHeartbeat?.();
         const error = daemon.heartbeatErrors.shift();
         if (error !== undefined) throw error;
         return { leaseId: options['leaseId'], tenantId: options['tenant'], runId: options['runId'], backend: options['leaseBackend'] };
       },
       release: async (options: Record<string, unknown>) => {
         daemon.calls.push({ config, operation: 'release', options });
+        daemon.onRelease?.();
         const error = daemon.releaseErrors.shift();
         if (error !== undefined) throw error;
         return { released: true };
@@ -52,13 +64,27 @@ vi.mock('agent-device', () => ({
   }),
 }));
 
-const ROOT = join('/', 'work', 'shop');
+/** A real directory: the provider writes each run's marker under the project root. */
+const ROOT = mkdtempSync(join(tmpdir(), 'testmu-unit-'));
+
+afterAll(() => {
+  rmSync(ROOT, { recursive: true, force: true });
+});
 const env = { LT_USERNAME: 'ada', LT_ACCESS_KEY: 'lt-key' };
 const options: TestmuOptions = { device: 'Galaxy S22 Ultra 5G', osVersion: '14', app: 'https://example.com/app.apk' };
 const saved = { LT_USERNAME: process.env['LT_USERNAME'], LT_ACCESS_KEY: process.env['LT_ACCESS_KEY'] };
 
 beforeEach(() => {
-  Object.assign(daemon, { calls: [], onAllocate: undefined, allocateError: undefined, releaseErrors: [], heartbeatErrors: [] });
+  Object.assign(daemon, {
+    calls: [],
+    onAllocate: undefined,
+    allocateGates: {},
+    onHeartbeat: undefined,
+    onRelease: undefined,
+    allocateError: undefined,
+    releaseErrors: [],
+    heartbeatErrors: [],
+  });
 });
 
 afterEach(() => {
@@ -92,13 +118,15 @@ const context: DeviceReleaseContext = { runId: 'run-1', targetName: 'android', e
 
 const operations = () => daemon.calls.map((call) => call.operation);
 
+const runnerCredentials = () => [process.env['LT_USERNAME'], process.env['LT_ACCESS_KEY']];
+
 const MINUTE = 60_000;
 
 describe('testmu()', () => {
-  it('is a device provider named testmu that leaves recording to agent-device', () => {
+  it("is a device provider named testmu that records through TestMu AI's own session video", () => {
     const provider = testmu(options);
     expect(provider.name).toBe('testmu');
-    expect(provider.record).toBeUndefined();
+    expect(provider.record).toBeTypeOf('function');
   });
 
   it('allocates an Android lease from a daemon under the project root, with the device selectors and dashboard labels', async () => {
@@ -120,6 +148,7 @@ describe('testmu()', () => {
           providerDeviceType: 'virtual',
           providerProject: 'e2e',
           providerBuild: 'run-1',
+          providerSessionName: 'e2e-run-1-android-2',
           ttlMs: 10 * MINUTE,
         },
       },
@@ -140,8 +169,31 @@ describe('testmu()', () => {
       providerDeviceType: 'real',
       providerProject: 'shop',
       providerBuild: 'nightly',
-      providerSessionName: 'checkout',
+      providerSessionName: 'checkout-1',
     });
+  });
+
+  it("names each slot's session after the run, the target, and the slot, and keeps a given name unique per slot", async () => {
+    const provider = testmu(options);
+    await provider.acquire(request({ runId: 'run-7', targetName: 'pixel', slot: 0, slots: 3 }));
+    await provider.acquire(request({ runId: 'run-7', targetName: 'pixel', slot: 2, slots: 3 }));
+    await testmu({ ...options, sessionName: 'checkout' }).acquire(request({ slot: 2, slots: 3 }));
+    await testmu({ ...options, sessionName: 'checkout' }).acquire(request({ slot: 0, slots: 1 }));
+    expect(daemon.calls.map((call) => call.options['providerSessionName'])).toEqual(['e2e-run-7-pixel-1', 'e2e-run-7-pixel-3', 'checkout-3', 'checkout']);
+  });
+
+  it('passes the device features to the allocation and the worker under agent-device\'s keys', async () => {
+    const lease = await testmu({ ...options, orientation: 'landscape', geoLocation: 'US', timezone: 'UTC+05:30', language: 'fr', locale: 'fr_FR', appiumVersion: '2.16.2' }).acquire(request());
+    const features = {
+      providerDeviceOrientation: 'landscape',
+      providerGeoLocation: 'US',
+      providerTimezone: 'UTC+05:30',
+      providerLanguage: 'fr',
+      providerLocale: 'fr_FR',
+      providerAppiumVersion: '2.16.2',
+    };
+    expect(daemon.calls[0]?.options).toMatchObject(features);
+    expect(lease.client).toMatchObject(features);
   });
 
   it('resolves a local build against the project root, never the working directory', async () => {
@@ -171,21 +223,103 @@ describe('testmu()', () => {
         providerDeviceType: 'virtual',
         providerProject: 'e2e',
         providerBuild: 'run-1',
+        providerSessionName: 'e2e-run-1-android-1',
       },
     });
     const json = JSON.stringify(lease);
     expect(JSON.parse(json)).toEqual(lease);
     expect(Buffer.byteLength(json)).toBeLessThan(1024);
     expect(json).not.toContain('lt-key');
-    expect(req.lines).toEqual(['lease lease-1: Galaxy S22 Ultra 5G, android 14 (virtual); the session starts on the first command']);
+    expect(req.lines).toEqual(['lease lease-1: Galaxy S22 Ultra 5G, android 14 (virtual); session e2e-run-1-android-1 started']);
   });
 
-  it('shares the run\'s credentials with the daemon it starts', async () => {
+  it("shares the run's credentials with a daemon the allocation starts, and puts back the process's own after it", async () => {
     delete process.env['LT_USERNAME'];
     process.env['LT_ACCESS_KEY'] = 'stale';
-    daemon.onAllocate = () => expect([process.env['LT_USERNAME'], process.env['LT_ACCESS_KEY']]).toEqual(['ada', 'lt-key']);
+    daemon.onAllocate = () => expect(runnerCredentials()).toEqual(['ada', 'lt-key']);
     await testmu(options).acquire(request({ env: { LT_USERNAME: ' ada ', LT_ACCESS_KEY: 'lt-key' } }));
     expect(operations()).toEqual(['allocate']);
+    expect(runnerCredentials()).toEqual([undefined, 'stale']);
+  });
+
+  it('keeps the credentials in place until every allocation running at once has finished', async () => {
+    delete process.env['LT_USERNAME'];
+    delete process.env['LT_ACCESS_KEY'];
+    let open!: () => void;
+    daemon.allocateGates = { 'lease-1': new Promise<void>((resolve) => (open = resolve)) };
+    const seen: unknown[] = [];
+    daemon.onAllocate = () => seen.push(runnerCredentials());
+    const provider = testmu(options);
+    const first = provider.acquire(request({ slot: 0 }));
+    const second = provider.acquire(request({ slot: 1 }));
+    await vi.waitFor(() => expect(operations()).toEqual(['allocate', 'allocate']));
+    await first;
+    expect(runnerCredentials()).toEqual(['ada', 'lt-key']);
+    open();
+    await second;
+    expect(seen).toEqual([
+      ['ada', 'lt-key'],
+      ['ada', 'lt-key'],
+    ]);
+    expect(runnerCredentials()).toEqual([undefined, undefined]);
+  });
+
+  it('makes a daemon call with other credentials wait until the calls with the first have finished', async () => {
+    delete process.env['LT_USERNAME'];
+    delete process.env['LT_ACCESS_KEY'];
+    let open!: () => void;
+    daemon.allocateGates = { 'lease-0': new Promise<void>((resolve) => (open = resolve)) };
+    const seen: unknown[] = [];
+    daemon.onAllocate = () => seen.push(runnerCredentials());
+    const alice = testmu(options).acquire(request({ env: { LT_USERNAME: 'alice', LT_ACCESS_KEY: 'alice-key' } }));
+    await vi.waitFor(() => expect(operations()).toEqual(['allocate']));
+    const bob = testmu(options).acquire(request({ slot: 1, env: { LT_USERNAME: 'bob', LT_ACCESS_KEY: 'bob-key' } }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(operations()).toEqual(['allocate']);
+    expect(runnerCredentials()).toEqual(['alice', 'alice-key']);
+    open();
+    await Promise.all([alice, bob]);
+    expect(seen).toEqual([
+      ['alice', 'alice-key'],
+      ['bob', 'bob-key'],
+    ]);
+    expect(runnerCredentials()).toEqual([undefined, undefined]);
+  });
+
+  it('leaves a value the host changed during a daemon call', async () => {
+    process.env['LT_USERNAME'] = 'host';
+    process.env['LT_ACCESS_KEY'] = 'host-key';
+    daemon.onAllocate = () => {
+      process.env['LT_USERNAME'] = 'changed-by-host';
+    };
+    await testmu(options).acquire(request());
+    expect(runnerCredentials()).toEqual(['changed-by-host', 'host-key']);
+  });
+
+  it('shares the credentials with a daemon a heartbeat or a release starts', async () => {
+    vi.useFakeTimers();
+    process.env['LT_USERNAME'] = 'host';
+    delete process.env['LT_ACCESS_KEY'];
+    const seen: unknown[] = [];
+    daemon.onHeartbeat = () => seen.push(['heartbeat', ...runnerCredentials()]);
+    daemon.onRelease = () => seen.push(['release', ...runnerCredentials()]);
+    const provider = testmu(options);
+    const lease = await provider.acquire(request());
+    await vi.advanceTimersByTimeAsync(2 * MINUTE);
+    expect(runnerCredentials()).toEqual(['host', undefined]);
+    await provider.release(lease, { ...context, env: { LT_USERNAME: 'grace', LT_ACCESS_KEY: 'other-key' } });
+    expect(seen).toEqual([
+      ['heartbeat', 'ada', 'lt-key'],
+      ['release', 'grace', 'other-key'],
+    ]);
+    expect(runnerCredentials()).toEqual(['host', undefined]);
+  });
+
+  it('releases a lease without credentials in the release environment, through the daemon already running', async () => {
+    const provider = testmu(options);
+    const lease = await provider.acquire(request());
+    await provider.release(lease, { ...context, env: {} });
+    expect(operations()).toEqual(['allocate', 'release']);
   });
 
   it.each([
@@ -351,9 +485,29 @@ describe('testmu()', () => {
     expect(() => testmu(rest as TestmuOptions)).toThrow(expect.objectContaining({ code: 'INVALID_CONFIG' }));
   });
 
-  it('refuses a device type other than virtual or real', () => {
-    expect(() => testmu({ ...options, deviceType: 'emulator' as 'virtual' })).toThrow(
-      expect.objectContaining({ code: 'INVALID_CONFIG', message: 'testmu: `deviceType` must be \'virtual\' or \'real\', not "emulator"' }),
+  it('refuses an orientation other than portrait or landscape', () => {
+    expect(() => testmu({ ...options, orientation: 'PORTRAIT' as 'portrait' })).toThrow(
+      expect.objectContaining({ code: 'INVALID_CONFIG', message: 'testmu: `orientation` must be \'portrait\' or \'landscape\', not "PORTRAIT"' }),
     );
+  });
+
+  it.each(['orientation', 'geoLocation', 'timezone', 'language', 'locale', 'appiumVersion'] as const)('refuses an empty or non-string `%s` with INVALID_CONFIG', (key) => {
+    expect(() => testmu({ ...options, [key]: ' ' } as unknown as TestmuOptions)).toThrow(expect.objectContaining({ code: 'INVALID_CONFIG', message: `testmu: \`${key}\` must be a non-empty string` }));
+    expect(() => testmu({ ...options, [key]: 2 } as unknown as TestmuOptions)).toThrow(expect.objectContaining({ code: 'INVALID_CONFIG' }));
+    expect(() => testmu({ ...options, [key]: null } as unknown as TestmuOptions)).toThrow(expect.objectContaining({ code: 'INVALID_CONFIG' }));
+  });
+
+  it.each(['emulator', null])('refuses a device type other than virtual or real (%j)', (deviceType) => {
+    expect(() => testmu({ ...options, deviceType } as unknown as TestmuOptions)).toThrow(
+      expect.objectContaining({ code: 'INVALID_CONFIG', message: `testmu: \`deviceType\` must be 'virtual' or 'real', not ${JSON.stringify(deviceType)}` }),
+    );
+  });
+
+  it.each(['project', 'build', 'sessionName', 'stateDir'] as const)('refuses an empty or non-string `%s` with INVALID_CONFIG', (key) => {
+    for (const value of [' ', 1, null]) {
+      expect(() => testmu({ ...options, [key]: value } as unknown as TestmuOptions)).toThrow(
+        expect.objectContaining({ code: 'INVALID_CONFIG', message: `testmu: \`${key}\` must be a non-empty string` }),
+      );
+    }
   });
 });
