@@ -1,7 +1,8 @@
 /**
  * TestMu AI's mobile automation sessions API over `fetch`, the one
  * agent-device's `testmu` provider reads session artifacts from: finds a
- * session by its build and name, and reads the URL of its video.
+ * session by its build and name, with its start time, and reads the URL of
+ * its video.
  */
 
 import type { TestmuCredentials } from './credentials.ts';
@@ -31,25 +32,20 @@ export function testmuApiEndpoint(env: Readonly<Record<string, string | undefine
   return override.replace(/\/+$/, '');
 }
 
-/**
- * The video URL of the newest session named `sessionName` in `build`: the
- * list finds the session's `test_id`, and its details carry `video_url`.
- * Every request is bounded by `REQUEST_TIMEOUT_MS` and `signal`. Errors name
- * the build and the session, never the credentials or a URL.
- */
-export async function sessionVideoUrl(endpoint: string, credentials: TestmuCredentials, { build, sessionName }: SessionRef, signal: AbortSignal): Promise<string> {
-  const auth = `Basic ${Buffer.from(`${credentials.username}:${credentials.accessKey}`).toString('base64')}`;
-  const id = await findSession(endpoint, auth, { build, sessionName }, signal);
-  const what = `TestMu AI session ${id} (${JSON.stringify(sessionName)}, build ${JSON.stringify(build)})`;
-  const body = await getJson(new URL(`${endpoint}/sessions/${encodeURIComponent(id)}`), auth, signal, `${what} details`);
-  const details = asRecord(body['data']);
-  const videoUrl = details?.['video_url'];
-  if (typeof videoUrl !== 'string' || !isHttpUrl(videoUrl)) throw new Error(`${what} reports no video URL`);
-  return videoUrl;
+/** A session the list found: its `test_id`, and when it started, if the list says. */
+export interface FoundSession {
+  readonly id: string;
+  /** ISO timestamp in UTC; `undefined` when the row has no start time or one that does not parse. */
+  readonly startedAt: string | undefined;
 }
 
-/** The `test_id` of the newest session named `sessionName` in `build`, reading the list a page at a time. */
-async function findSession(endpoint: string, auth: string, { build, sessionName }: SessionRef, signal: AbortSignal): Promise<string> {
+/**
+ * The newest session named `sessionName` in `build`, reading the list a page
+ * at a time. Every request is bounded by `REQUEST_TIMEOUT_MS` and `signal`,
+ * and errors name the build and the session, never the credentials or a URL.
+ */
+export async function findSession(endpoint: string, credentials: TestmuCredentials, { build, sessionName }: SessionRef, signal: AbortSignal): Promise<FoundSession> {
+  const auth = basicAuth(credentials);
   const what = `TestMu AI session lookup for build ${JSON.stringify(build)}`;
   for (let page = 0; page < MAX_PAGES; page += 1) {
     const url = new URL(`${endpoint}/sessions`);
@@ -61,12 +57,42 @@ async function findSession(endpoint: string, auth: string, { build, sessionName 
     const rows = body['data'] ?? [];
     if (!Array.isArray(rows)) throw new Error(`${what} failed: no session list in the response`);
     for (const row of rows) {
-      const { name, test_id: id } = asRecord(row) ?? {};
-      if (name === sessionName && typeof id === 'string' && id !== '') return id;
+      const { name, test_id: id, start_timestamp: start } = asRecord(row) ?? {};
+      if (name === sessionName && typeof id === 'string' && id !== '') return { id, startedAt: utcTimestamp(start) };
     }
     if (rows.length < PAGE_SIZE) break;
   }
   throw new Error(`TestMu AI has no session named ${JSON.stringify(sessionName)} in build ${JSON.stringify(build)}`);
+}
+
+/** The `video_url` of session `id`'s details, bounded and named as `findSession` is. */
+export async function sessionVideoUrl(endpoint: string, credentials: TestmuCredentials, id: string, { build, sessionName }: SessionRef, signal: AbortSignal): Promise<string> {
+  const what = `TestMu AI session ${id} (${JSON.stringify(sessionName)}, build ${JSON.stringify(build)})`;
+  const body = await getJson(new URL(`${endpoint}/sessions/${encodeURIComponent(id)}`), basicAuth(credentials), signal, `${what} details`);
+  const details = asRecord(body['data']);
+  const videoUrl = details?.['video_url'];
+  if (typeof videoUrl !== 'string' || !isHttpUrl(videoUrl)) throw new Error(`${what} reports no video URL`);
+  return videoUrl;
+}
+
+const TIMESTAMP = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2}(?:\.\d+)?)(Z|[+-]\d{2}:\d{2})?$/;
+
+/**
+ * A `start_timestamp` as an ISO timestamp in UTC. The API formats the
+ * database time as RFC 3339 with its zone; a time without one is read as UTC,
+ * the zone the API's database driver reads it in.
+ */
+function utcTimestamp(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const match = TIMESTAMP.exec(value.trim());
+  if (match === null) return undefined;
+  const [, date, time, zone] = match;
+  const ms = Date.parse(`${date}T${time}${zone ?? 'Z'}`);
+  return Number.isNaN(ms) ? undefined : new Date(ms).toISOString();
+}
+
+function basicAuth({ username, accessKey }: TestmuCredentials): string {
+  return `Basic ${Buffer.from(`${username}:${accessKey}`).toString('base64')}`;
 }
 
 /** One authenticated GET answered with a JSON object; anything else throws, as `what`, with the HTTP status and the API's message. */

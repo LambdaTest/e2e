@@ -247,12 +247,16 @@ export default {
 ```
 
 TestMu AI records the whole session, from the lease to the end of the run,
-so the link is the same video for every attempt on that worker slot. The
-report records when the attempt started recording, to find the attempt in
-it. The runner never downloads the video; the link is the URL TestMu AI's
-sessions API returns for the session, and the provider finds the session by
-its build and name when the attempt stops recording. It reads the API at
-`TESTMU_API_ENDPOINT` when that is set, as agent-device does.
+so the link is the same video for every attempt on that worker slot, and
+the video starts when the session did. When the attempt starts recording,
+the provider finds the session through TestMu AI's sessions API by its
+build and name and takes the session's start time as the video's, so the
+report's timeline offsets land on the attempt within it; if TestMu AI
+reports no start time, the time the attempt started recording is used
+instead. When the attempt stops recording, the link is the video URL the
+API returns for the session. The runner never downloads the video. The
+provider reads the API at `TESTMU_API_ENDPOINT` when that is set, as
+agent-device does.
 
 ## What the provider does
 

@@ -11,7 +11,7 @@ import type { DeviceLease, DeviceProvider, DeviceRequest } from '@e2e-dev/mobile
 import { createAgentDeviceClient } from 'agent-device';
 import { ConfigurationError, rejectUnknownKeys, type ProviderRecordContext, type ProviderRecording } from 'e2e/engine';
 import { shareWithDaemon, testmuCredentials } from './credentials.ts';
-import { sessionVideoUrl, testmuApiEndpoint, type SessionRef } from './sessions.ts';
+import { findSession, sessionVideoUrl, testmuApiEndpoint, type SessionRef } from './sessions.ts';
 
 /** agent-device's name for TestMu AI, as the lease provider and the tenant. */
 const PROVIDER = 'testmu';
@@ -141,7 +141,8 @@ interface LeaseHandle {
  * session, which installs `app`, so every slot is billed from the moment it
  * is leased, whether or not a test runs on it, and releasing the lease ends it.
  * An attempt that records video links TestMu AI's recording of the whole
- * session, found by the lease's build and session name. It authenticates with `LT_USERNAME` and `LT_ACCESS_KEY` from the run's
+ * session, found by the lease's build and session name, and starting when
+ * the session did. It authenticates with `LT_USERNAME` and `LT_ACCESS_KEY` from the run's
  * environment, and needs an agent-device with the `testmu` provider.
  */
 export function testmu(options: TestmuOptions): DeviceProvider {
@@ -239,15 +240,18 @@ export function testmu(options: TestmuOptions): DeviceProvider {
       if (handle === undefined) throw new Error(`lease ${lease.id} carries no agent-device lease scope to release`);
       await release(lease.id, handle);
     },
-    // Runs in the worker, from the lease alone. TestMu AI records the whole session, not the attempt.
+    // Runs in the worker, from the lease alone. TestMu AI records the whole session, so its video starts when the session did.
     async record(lease: DeviceLease, context: ProviderRecordContext): Promise<ProviderRecording> {
+      const calledAt = new Date().toISOString();
       const session = sessionRef(lease);
       if (session === undefined) throw new Error(`lease ${lease.id} carries no TestMu AI build and session name to find its recording by`);
       const credentials = testmuCredentials(context.env);
       const endpoint = testmuApiEndpoint(context.env);
+      const found = await findSession(endpoint, credentials, session, context.signal);
       return {
-        startedAt: new Date().toISOString(),
-        stop: async ({ signal }) => ({ url: await sessionVideoUrl(endpoint, credentials, session, signal), mediaType: 'video/mp4' }),
+        // Without a usable start time from TestMu AI, the moment recording was asked for is the closest known bound.
+        startedAt: found.startedAt ?? calledAt,
+        stop: async ({ signal }) => ({ url: await sessionVideoUrl(endpoint, credentials, found.id, session, signal), mediaType: 'video/mp4' }),
       };
     },
   };

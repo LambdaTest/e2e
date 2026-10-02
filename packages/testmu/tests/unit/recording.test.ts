@@ -1,8 +1,8 @@
 /**
  * `testmu().record()` against a fake TestMu AI sessions API behind a stubbed
- * `fetch`: the session it finds by build and name, the video it links, the
- * endpoint override, and the failures it names without leaking credentials
- * or signed URLs.
+ * `fetch`: the session it finds by build and name, the start time it takes
+ * from it, the video it links, the endpoint override, and the failures it
+ * names without leaking credentials or signed URLs.
  */
 
 import type { DeviceLease } from '@e2e-dev/mobile';
@@ -44,9 +44,9 @@ beforeEach(() => {
   Object.assign(api, {
     calls: [],
     sessions: [
-      { test_id: 'T3', name: 'e2e-run-1-android-1', build_name: 'run-1' },
-      { test_id: 'T2', name: 'e2e-run-1-android-2', build_name: 'run-1' },
-      { test_id: 'T1', name: 'e2e-run-1-android-2', build_name: 'run-1' },
+      { test_id: 'T3', name: 'e2e-run-1-android-1', build_name: 'run-1', start_timestamp: '2026-10-02T09:58:05Z' },
+      { test_id: 'T2', name: 'e2e-run-1-android-2', build_name: 'run-1', start_timestamp: '2026-10-02T09:58:07Z' },
+      { test_id: 'T1', name: 'e2e-run-1-android-2', build_name: 'run-1', start_timestamp: '2026-10-01T08:00:00Z' },
     ],
     details: { T2: { test_id: 'T2', name: 'e2e-run-1-android-2', video_url: VIDEO }, T1: { test_id: 'T1', video_url: 'https://videos.example.com/old.mp4' } },
     override: undefined,
@@ -104,19 +104,29 @@ async function record(recordLease: DeviceLease = lease, recordContext: ProviderR
 }
 
 describe('testmu().record()', () => {
-  it('starts at the moment it is called and asks TestMu AI nothing until it stops', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    vi.setSystemTime(new Date('2026-10-02T10:00:00.000Z'));
+  it("starts at the newest session's start time, found by the slot's name in the lease's build, and links its video when it stops", async () => {
     const recording = await record();
-    expect(recording.startedAt).toBe('2026-10-02T10:00:00.000Z');
-    expect(api.calls).toEqual([]);
-  });
-
-  it("links the video of the newest session with the slot's name in the lease's build", async () => {
-    const recording = await record();
+    expect(recording.startedAt).toBe('2026-10-02T09:58:07.000Z');
+    expect(api.calls.map((call) => call.url.href)).toEqual([`${API}/sessions?build=run-1&limit=50&offset=0`]);
     await expect(recording.stop(stopContext())).resolves.toEqual({ url: VIDEO, mediaType: 'video/mp4' });
     expect(api.calls.map((call) => call.url.href)).toEqual([`${API}/sessions?build=run-1&limit=50&offset=0`, `${API}/sessions/T2`]);
     expect(api.calls.map((call) => call.authorization)).toEqual([`Basic ${Buffer.from('ada:lt-key').toString('base64')}`, `Basic ${Buffer.from('ada:lt-key').toString('base64')}`]);
+  });
+
+  it.each([
+    ['2026-10-02T09:58:07.25+05:30', '2026-10-02T04:28:07.250Z'],
+    ['2026-10-02 09:58:07', '2026-10-02T09:58:07.000Z'],
+  ])('reads the start time %s as %s, a time without a zone as UTC', async (start, iso) => {
+    api.sessions[1]!['start_timestamp'] = start;
+    expect((await record()).startedAt).toBe(iso);
+  });
+
+  it.each([undefined, null, '', 'yesterday', '2026-13-45T99:00:00Z'])('falls back to the moment it is called without a usable start time (%j)', async (start) => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-02T10:00:00.000Z'));
+    if (start === undefined) delete api.sessions[1]!['start_timestamp'];
+    else api.sessions[1]!['start_timestamp'] = start;
+    expect((await record()).startedAt).toBe('2026-10-02T10:00:00.000Z');
   });
 
   it('reads the lease after a round trip through JSON, as the worker gets it', async () => {
@@ -139,9 +149,9 @@ describe('testmu().record()', () => {
     ]);
   });
 
-  it('names the build and the session when the build has no session by that name', async () => {
+  it('fails to start, naming the build and the session, when the build has no session by that name', async () => {
     api.sessions = api.sessions.filter((row) => row['name'] !== 'e2e-run-1-android-2');
-    await expect((await record()).stop(stopContext())).rejects.toThrow('TestMu AI has no session named "e2e-run-1-android-2" in build "run-1"');
+    await expect(record()).rejects.toThrow('TestMu AI has no session named "e2e-run-1-android-2" in build "run-1"');
   });
 
   it('names the session when its details carry no video URL', async () => {
@@ -153,7 +163,7 @@ describe('testmu().record()', () => {
 
   it('reports an HTTP failure with its status and message, never the credentials or the request URL', async () => {
     api.override = () => Response.json({ status: 'fail', message: 'Unauthorized' }, { status: 401 });
-    const error = await failure((await record()).stop(stopContext()));
+    const error = await failure(record());
     expect(error.message).toBe('TestMu AI session lookup for build "run-1" failed: HTTP 401 (Unauthorized)');
     expect(JSON.stringify(error, Object.getOwnPropertyNames(error))).not.toContain('lt-key');
   });
@@ -165,9 +175,9 @@ describe('testmu().record()', () => {
 
   it('reports a response that is not JSON, or not a session list', async () => {
     api.override = () => new Response('<html>Bad gateway</html>', { status: 502 });
-    await expect((await record()).stop(stopContext())).rejects.toThrow('TestMu AI session lookup for build "run-1" failed: HTTP 502, not JSON');
+    await expect(record()).rejects.toThrow('TestMu AI session lookup for build "run-1" failed: HTTP 502, not JSON');
     api.override = () => Response.json({ status: 'success', data: { sessions: [] } });
-    await expect((await record()).stop(stopContext())).rejects.toThrow('TestMu AI session lookup for build "run-1" failed: no session list in the response');
+    await expect(record()).rejects.toThrow('TestMu AI session lookup for build "run-1" failed: no session list in the response');
   });
 
   it('gives up on a request TestMu AI does not answer within 15 seconds', async () => {
@@ -176,15 +186,16 @@ describe('testmu().record()', () => {
       api.calls.push({ url: new URL(input), authorization: undefined });
       return new Promise<Response>((_, reject) => init.signal?.addEventListener('abort', () => reject(init.signal?.reason)));
     });
-    const stopped = failure((await record()).stop(stopContext()));
+    const started = failure(record());
     await vi.advanceTimersByTimeAsync(15_000);
-    expect((await stopped).message).toBe('TestMu AI session lookup for build "run-1" got no answer within 15 s');
+    expect((await started).message).toBe('TestMu AI session lookup for build "run-1" got no answer within 15 s');
   });
 
-  it('stops asking once the stop is cancelled', async () => {
+  it('stops asking once the attempt or the stop is cancelled', async () => {
     const controller = new AbortController();
     controller.abort();
-    await expect((await record()).stop(stopContext(controller.signal))).rejects.toThrow('TestMu AI session lookup for build "run-1" cancelled');
+    await expect(record(lease, context({ signal: controller.signal }))).rejects.toThrow('TestMu AI session lookup for build "run-1" cancelled');
+    await expect((await record()).stop(stopContext(controller.signal))).rejects.toThrow('TestMu AI session T2 ("e2e-run-1-android-2", build "run-1") details cancelled');
   });
 
   it('refuses to start for a lease without a build and a session name', async () => {
