@@ -255,6 +255,38 @@ describe('testmu()', () => {
     expect(runnerCredentials()).toEqual([undefined, undefined]);
   });
 
+  it('makes a daemon call with other credentials wait until the calls with the first have finished', async () => {
+    delete process.env['LT_USERNAME'];
+    delete process.env['LT_ACCESS_KEY'];
+    let open!: () => void;
+    daemon.allocateWaits = [new Promise<void>((resolve) => (open = resolve))];
+    const seen: unknown[] = [];
+    daemon.onAllocate = () => seen.push(runnerCredentials());
+    const alice = testmu(options).acquire(request({ env: { LT_USERNAME: 'alice', LT_ACCESS_KEY: 'alice-key' } }));
+    await vi.waitFor(() => expect(operations()).toEqual(['allocate']));
+    const bob = testmu(options).acquire(request({ env: { LT_USERNAME: 'bob', LT_ACCESS_KEY: 'bob-key' } }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(operations()).toEqual(['allocate']);
+    expect(runnerCredentials()).toEqual(['alice', 'alice-key']);
+    open();
+    await Promise.all([alice, bob]);
+    expect(seen).toEqual([
+      ['alice', 'alice-key'],
+      ['bob', 'bob-key'],
+    ]);
+    expect(runnerCredentials()).toEqual([undefined, undefined]);
+  });
+
+  it('leaves a value the host changed during a daemon call', async () => {
+    process.env['LT_USERNAME'] = 'host';
+    process.env['LT_ACCESS_KEY'] = 'host-key';
+    daemon.onAllocate = () => {
+      process.env['LT_USERNAME'] = 'changed-by-host';
+    };
+    await testmu(options).acquire(request());
+    expect(runnerCredentials()).toEqual(['changed-by-host', 'host-key']);
+  });
+
   it('shares the credentials with a daemon a heartbeat or a release starts', async () => {
     vi.useFakeTimers();
     process.env['LT_USERNAME'] = 'host';

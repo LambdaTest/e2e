@@ -140,8 +140,11 @@ environment and takes no other, so while the provider calls the daemon (to
 allocate, heartbeat, or release a lease), it sets `LT_USERNAME` and
 `LT_ACCESS_KEY` from the run's environment in the runner's `process.env`,
 where a daemon the call starts reads them. Once no such call is running, it
-puts back the values `process.env` had before, so the credentials do not
-stay there for other child processes of a long-lived host.
+puts back the values `process.env` had before, unless the host changed them
+in the meantime, so the credentials do not stay there for other child
+processes of a long-lived host. In a host that runs several runs with
+different credentials at once, their daemon calls take turns, so no daemon
+starts with another run's credentials.
 
 ## Install the app
 
