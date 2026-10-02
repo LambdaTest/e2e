@@ -44,9 +44,10 @@ beforeEach(() => {
   Object.assign(api, {
     calls: [],
     sessions: [
-      { test_id: 'T3', name: 'e2e-run-1-android-1', build_name: 'run-1', start_timestamp: '2026-10-02T09:58:05Z' },
-      { test_id: 'T2', name: 'e2e-run-1-android-2', build_name: 'run-1', start_timestamp: '2026-10-02T09:58:07Z' },
-      { test_id: 'T1', name: 'e2e-run-1-android-2', build_name: 'run-1', start_timestamp: '2026-10-01T08:00:00Z' },
+      { test_id: 'T4', name: 'e2e-run-1-android-2', build_name: 'run-1', username: 'grace', start_timestamp: '2026-10-02T09:59:00Z' },
+      { test_id: 'T3', name: 'e2e-run-1-android-1', build_name: 'run-1', username: 'ada', start_timestamp: '2026-10-02T09:58:05Z' },
+      { test_id: 'T2', name: 'e2e-run-1-android-2', build_name: 'run-1', username: 'ada', start_timestamp: '2026-10-02T09:58:07Z' },
+      { test_id: 'T1', name: 'e2e-run-1-android-2', build_name: 'run-1', username: 'ada', start_timestamp: '2026-10-01T08:00:00Z' },
     ],
     details: { T2: { test_id: 'T2', name: 'e2e-run-1-android-2', video_url: VIDEO }, T1: { test_id: 'T1', video_url: 'https://videos.example.com/old.mp4' } },
     override: undefined,
@@ -63,9 +64,10 @@ beforeEach(() => {
     const base = new URL(API).pathname;
     if (url.pathname === `${base}/sessions`) {
       const build = url.searchParams.get('build');
+      const username = url.searchParams.get('username');
       const limit = Number(url.searchParams.get('limit') ?? '10');
       const offset = Number(url.searchParams.get('offset') ?? '0');
-      const rows = api.sessions.filter((row) => row['build_name'] === build).slice(offset, offset + limit);
+      const rows = api.sessions.filter((row) => row['build_name'] === build && (username === null || row['username'] === username)).slice(offset, offset + limit);
       // An empty page is Go's nil slice: `data: null`.
       return Response.json({ status: 'success', data: rows.length === 0 ? null : rows, message: 'Retrieve session list was successful', Meta: { result_set: { count: rows.length } } });
     }
@@ -104,12 +106,12 @@ async function record(recordLease: DeviceLease = lease, recordContext: ProviderR
 }
 
 describe('testmu().record()', () => {
-  it("starts at the newest session's start time, found by the slot's name in the lease's build, and links its video when it stops", async () => {
+  it("starts at the newest session's start time, found by the slot's name in the lease's build among the user's own, and links its video when it stops", async () => {
     const recording = await record();
     expect(recording.startedAt).toBe('2026-10-02T09:58:07.000Z');
-    expect(api.calls.map((call) => call.url.href)).toEqual([`${API}/sessions?build=run-1&limit=50&offset=0`]);
+    expect(api.calls.map((call) => call.url.href)).toEqual([`${API}/sessions?build=run-1&username=ada&limit=50&offset=0`]);
     await expect(recording.stop(stopContext())).resolves.toEqual({ url: VIDEO, mediaType: 'video/mp4' });
-    expect(api.calls.map((call) => call.url.href)).toEqual([`${API}/sessions?build=run-1&limit=50&offset=0`, `${API}/sessions/T2`]);
+    expect(api.calls.map((call) => call.url.href)).toEqual([`${API}/sessions?build=run-1&username=ada&limit=50&offset=0`, `${API}/sessions/T2`]);
     expect(api.calls.map((call) => call.authorization)).toEqual([`Basic ${Buffer.from('ada:lt-key').toString('base64')}`, `Basic ${Buffer.from('ada:lt-key').toString('base64')}`]);
   });
 
@@ -117,15 +119,15 @@ describe('testmu().record()', () => {
     ['2026-10-02T09:58:07.25+05:30', '2026-10-02T04:28:07.250Z'],
     ['2026-10-02 09:58:07', '2026-10-02T09:58:07.000Z'],
   ])('reads the start time %s as %s, a time without a zone as UTC', async (start, iso) => {
-    api.sessions[1]!['start_timestamp'] = start;
+    api.sessions[2]!['start_timestamp'] = start;
     expect((await record()).startedAt).toBe(iso);
   });
 
   it.each([undefined, null, '', 'yesterday', '2026-13-45T99:00:00Z'])('falls back to the moment it is called without a usable start time (%j)', async (start) => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date('2026-10-02T10:00:00.000Z'));
-    if (start === undefined) delete api.sessions[1]!['start_timestamp'];
-    else api.sessions[1]!['start_timestamp'] = start;
+    if (start === undefined) delete api.sessions[2]!['start_timestamp'];
+    else api.sessions[2]!['start_timestamp'] = start;
     expect((await record()).startedAt).toBe('2026-10-02T10:00:00.000Z');
   });
 
@@ -135,7 +137,7 @@ describe('testmu().record()', () => {
   });
 
   it('pages through a build holding more sessions than one page', async () => {
-    api.sessions = [...Array.from({ length: 50 }, (_, index) => ({ test_id: `X${index}`, name: `other-${index}`, build_name: 'run-1' })), ...api.sessions];
+    api.sessions = [...Array.from({ length: 50 }, (_, index) => ({ test_id: `X${index}`, name: `other-${index}`, build_name: 'run-1', username: 'ada' })), ...api.sessions];
     await expect((await record()).stop(stopContext())).resolves.toMatchObject({ url: VIDEO });
     expect(api.calls.map((call) => call.url.searchParams.get('offset'))).toEqual(['0', '50', null]);
   });
@@ -144,7 +146,7 @@ describe('testmu().record()', () => {
     const recording = await record(lease, context({ env: { ...env, TESTMU_API_ENDPOINT: 'https://stage-mobile-api.lambdatest.com/mobile-automation/api/v1/' } }));
     await expect(recording.stop(stopContext())).resolves.toMatchObject({ url: VIDEO });
     expect(api.calls.map((call) => call.url.href)).toEqual([
-      'https://stage-mobile-api.lambdatest.com/mobile-automation/api/v1/sessions?build=run-1&limit=50&offset=0',
+      'https://stage-mobile-api.lambdatest.com/mobile-automation/api/v1/sessions?build=run-1&username=ada&limit=50&offset=0',
       'https://stage-mobile-api.lambdatest.com/mobile-automation/api/v1/sessions/T2',
     ]);
   });

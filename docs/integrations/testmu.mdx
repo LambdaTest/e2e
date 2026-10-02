@@ -265,13 +265,20 @@ TestMu AI records the whole session, from the lease to the end of the run,
 so the link is the same video for every attempt on that worker slot, and
 the video starts when the session did. When the attempt starts recording,
 the provider finds the session through TestMu AI's sessions API by its
-build and name and takes the session's start time as the video's, so the
+build and name, among the sessions of the `LT_USERNAME` user, taking the
+newest that matches, and takes the session's start time as the video's, so the
 report's timeline offsets land on the attempt within it; if TestMu AI
 reports no start time, the time the attempt started recording is used
 instead. When the attempt stops recording, the link is the video URL the
 API returns for the session. The runner never downloads the video. The
 provider reads the API at `TESTMU_API_ENDPOINT` when that is set, as
 agent-device does.
+
+The default `build` (the run id) and `sessionName` (with the run id in it)
+give every session its own name. A fixed `build` and a fixed `sessionName`
+shared by runs that overlap name several sessions the same, so an attempt
+can link another run's video; give such runs their own `build`, or leave
+`sessionName` to its default.
 
 ## What the provider does
 

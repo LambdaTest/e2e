@@ -50,8 +50,8 @@ export interface FoundSession {
 }
 
 /**
- * The newest session named `sessionName` in `build`, reading the list a page
- * at a time. Every request is bounded by `REQUEST_TIMEOUT_MS` and `signal`,
+ * The newest session named `sessionName` in `build` that the credentials'
+ * user started, reading the list a page at a time. Every request is bounded by `REQUEST_TIMEOUT_MS` and `signal`,
  * and errors name the build and the session, never the credentials or a URL.
  */
 export async function findSession(endpoint: string, credentials: TestmuCredentials, { build, sessionName }: SessionRef, signal: AbortSignal): Promise<FoundSession> {
@@ -60,6 +60,8 @@ export async function findSession(endpoint: string, credentials: TestmuCredentia
   for (let page = 0; page < MAX_PAGES; page += 1) {
     const url = new URL(`${endpoint}/sessions`);
     url.searchParams.set('build', build);
+    // The build filter spans the whole organization; a build name another user's run shares would find their session.
+    url.searchParams.set('username', credentials.username);
     url.searchParams.set('limit', String(PAGE_SIZE));
     url.searchParams.set('offset', String(page * PAGE_SIZE));
     const body = await getJson(url, auth, signal, what);

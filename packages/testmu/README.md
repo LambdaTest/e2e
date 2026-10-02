@@ -71,7 +71,8 @@ Sessions run over TestMu AI's Appium hub, so agent-device's device settings,
 system alerts, recording, device logs, and port reverse are not available
 there. An attempt that records video links TestMu AI's recording of the
 whole session instead, found by the session's build and name and starting
-at the session's start time.
+at the session's start time. Runs that overlap and share a fixed `build`
+and `sessionName` can link each other's videos; the defaults never do.
 
 Full documentation lives at [e2e.tester.army/docs/integrations/testmu](https://e2e.tester.army/docs/integrations/testmu).
 
