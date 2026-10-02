@@ -1,10 +1,11 @@
 /**
  * `testmu()` pruning the state directories earlier runs left under
- * `stateDir`: once per provider, only run directories older than a day,
- * never the current run's, and never failing the lease.
+ * `stateDir`: once per provider, only directories it marked as its own whose
+ * newest file is older than a day, never the current run's, and never
+ * failing the lease; and the marker it writes and keeps fresh.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DeviceRequest } from '@e2e-dev/mobile';
@@ -27,7 +28,13 @@ const OLD_RUN = '01a0e000-0000-7000-8000-000000000001';
 const RECENT_RUN = '01a0e000-0000-7000-8000-000000000002';
 /** A file named like a run: only directories are pruned. */
 const RUN_FILE = '01a0e000-0000-7000-8000-000000000003';
+/** A directory named like a run that another tool keeps under the same directory. */
+const FOREIGN_RUN = '01a0e000-0000-7000-8000-000000000004';
+/** A marked run, still going in another process, whose daemon wrote its log recently. */
+const LONG_RUN = '01a0e000-0000-7000-8000-000000000005';
+const MARKER = '.e2e-testmu-run';
 const HOUR = 60 * 60_000;
+const MINUTE = 60_000;
 
 let root: string;
 let base: string;
@@ -42,13 +49,23 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-/** A directory under the state directory, last modified `ageMs` ago, with a daemon log in it. */
-function runDir(name: string, ageMs: number): void {
+/** Sets a path's modification time `ageMs` ago. */
+function age(path: string, ageMs: number): void {
+  const time = new Date(Date.now() - ageMs);
+  utimesSync(path, time, time);
+}
+
+/** A run directory under the state directory with a daemon log, marked as the provider's unless `marked` is false, every entry `ageMs` old. */
+function runDir(name: string, ageMs: number, { marked = true } = {}): void {
   const dir = join(base, name);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'daemon.log'), 'log');
-  const time = new Date(Date.now() - ageMs);
-  utimesSync(dir, time, time);
+  age(join(dir, 'daemon.log'), ageMs);
+  if (marked) {
+    writeFileSync(join(dir, MARKER), '');
+    age(join(dir, MARKER), ageMs);
+  }
+  age(dir, ageMs);
 }
 
 function request(overrides: Partial<DeviceRequest> = {}): DeviceRequest {
@@ -68,15 +85,40 @@ function request(overrides: Partial<DeviceRequest> = {}): DeviceRequest {
 }
 
 describe('testmu() state directory pruning', () => {
-  it("removes earlier runs' directories older than a day, and keeps the current run's, recent ones, and anything not named like a run", async () => {
+  it("removes earlier runs' marked directories older than a day, and keeps the current run's, recent ones, and anything it did not mark", async () => {
     runDir(OLD_RUN, 25 * HOUR);
     runDir(RECENT_RUN, 23 * HOUR);
     runDir(CURRENT_RUN, 48 * HOUR);
+    runDir(FOREIGN_RUN, 48 * HOUR, { marked: false });
     runDir('notes', 48 * HOUR);
     writeFileSync(join(base, RUN_FILE), 'a file');
-    utimesSync(join(base, RUN_FILE), new Date(Date.now() - 48 * HOUR), new Date(Date.now() - 48 * HOUR));
+    age(join(base, RUN_FILE), 48 * HOUR);
     await testmu(options).acquire(request());
-    expect(readdirSync(base).toSorted()).toEqual([CURRENT_RUN, RECENT_RUN, RUN_FILE, 'notes'].toSorted());
+    expect(readdirSync(base).toSorted()).toEqual([CURRENT_RUN, FOREIGN_RUN, RECENT_RUN, RUN_FILE, 'notes'].toSorted());
+  });
+
+  it('keeps a marked run whose daemon wrote a file within the day, however old its marker and directory', async () => {
+    runDir(LONG_RUN, 30 * HOUR);
+    age(join(base, LONG_RUN, 'daemon.log'), HOUR);
+    age(join(base, LONG_RUN), 30 * HOUR);
+    await testmu(options).acquire(request());
+    expect(existsSync(join(base, LONG_RUN))).toBe(true);
+  });
+
+  it("marks the run's directory when it leases, and touches the marker on every heartbeat", async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const provider = testmu(options);
+      const lease = await provider.acquire(request());
+      const marker = join(base, CURRENT_RUN, MARKER);
+      expect(statSync(marker).isFile()).toBe(true);
+      age(marker, 30 * HOUR);
+      await vi.advanceTimersByTimeAsync(2 * MINUTE);
+      await vi.waitFor(() => expect(Date.now() - statSync(marker).mtimeMs).toBeLessThan(HOUR));
+      await provider.release(lease, { runId: CURRENT_RUN, targetName: 'android', env: {}, signal: new AbortController().signal, log: () => undefined });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('prunes once per provider, on its first acquire', async () => {

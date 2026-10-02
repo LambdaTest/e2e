@@ -5,9 +5,11 @@
  * on every exit path. `recording.test.ts` covers `record`.
  */
 
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DeviceLease, DeviceReleaseContext, DeviceRequest } from '@e2e-dev/mobile';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { testmu, type TestmuOptions } from '../../src/index.ts';
 
 interface ClientCall {
@@ -20,8 +22,8 @@ const daemon = {
   calls: [] as ClientCall[],
   /** Runs inside `allocate`, before it answers. */
   onAllocate: undefined as (() => void) | undefined,
-  /** What each `allocate`, in order, waits for before it runs `onAllocate`. */
-  allocateWaits: [] as Promise<void>[],
+  /** What an `allocate` from a client of that session waits for, once, before it runs `onAllocate`. */
+  allocateGates: {} as Record<string, Promise<void>>,
   /** Runs inside `heartbeat` and `release`, before they answer. */
   onHeartbeat: undefined as (() => void) | undefined,
   onRelease: undefined as (() => void) | undefined,
@@ -37,8 +39,9 @@ vi.mock('agent-device', () => ({
     leases: {
       allocate: async (options: Record<string, unknown>) => {
         daemon.calls.push({ config, operation: 'allocate', options });
-        const wait = daemon.allocateWaits.shift();
-        if (wait !== undefined) await wait;
+        const gate = daemon.allocateGates[String(config['session'])];
+        delete daemon.allocateGates[String(config['session'])];
+        if (gate !== undefined) await gate;
         daemon.onAllocate?.();
         if (daemon.allocateError !== undefined) throw daemon.allocateError;
         return { leaseId: `lease-${daemon.calls.length}`, tenantId: options['tenant'], runId: options['runId'], backend: options['leaseBackend'], leaseProvider: options['leaseProvider'] };
@@ -61,7 +64,12 @@ vi.mock('agent-device', () => ({
   }),
 }));
 
-const ROOT = join('/', 'work', 'shop');
+/** A real directory: the provider writes each run's marker under the project root. */
+const ROOT = mkdtempSync(join(tmpdir(), 'testmu-unit-'));
+
+afterAll(() => {
+  rmSync(ROOT, { recursive: true, force: true });
+});
 const env = { LT_USERNAME: 'ada', LT_ACCESS_KEY: 'lt-key' };
 const options: TestmuOptions = { device: 'Galaxy S22 Ultra 5G', osVersion: '14', app: 'https://example.com/app.apk' };
 const saved = { LT_USERNAME: process.env['LT_USERNAME'], LT_ACCESS_KEY: process.env['LT_ACCESS_KEY'] };
@@ -70,7 +78,7 @@ beforeEach(() => {
   Object.assign(daemon, {
     calls: [],
     onAllocate: undefined,
-    allocateWaits: [],
+    allocateGates: {},
     onHeartbeat: undefined,
     onRelease: undefined,
     allocateError: undefined,
@@ -238,12 +246,13 @@ describe('testmu()', () => {
     delete process.env['LT_USERNAME'];
     delete process.env['LT_ACCESS_KEY'];
     let open!: () => void;
-    daemon.allocateWaits = [Promise.resolve(), new Promise<void>((resolve) => (open = resolve))];
+    daemon.allocateGates = { 'lease-1': new Promise<void>((resolve) => (open = resolve)) };
     const seen: unknown[] = [];
     daemon.onAllocate = () => seen.push(runnerCredentials());
     const provider = testmu(options);
     const first = provider.acquire(request({ slot: 0 }));
     const second = provider.acquire(request({ slot: 1 }));
+    await vi.waitFor(() => expect(operations()).toEqual(['allocate', 'allocate']));
     await first;
     expect(runnerCredentials()).toEqual(['ada', 'lt-key']);
     open();
@@ -259,12 +268,12 @@ describe('testmu()', () => {
     delete process.env['LT_USERNAME'];
     delete process.env['LT_ACCESS_KEY'];
     let open!: () => void;
-    daemon.allocateWaits = [new Promise<void>((resolve) => (open = resolve))];
+    daemon.allocateGates = { 'lease-0': new Promise<void>((resolve) => (open = resolve)) };
     const seen: unknown[] = [];
     daemon.onAllocate = () => seen.push(runnerCredentials());
     const alice = testmu(options).acquire(request({ env: { LT_USERNAME: 'alice', LT_ACCESS_KEY: 'alice-key' } }));
     await vi.waitFor(() => expect(operations()).toEqual(['allocate']));
-    const bob = testmu(options).acquire(request({ env: { LT_USERNAME: 'bob', LT_ACCESS_KEY: 'bob-key' } }));
+    const bob = testmu(options).acquire(request({ slot: 1, env: { LT_USERNAME: 'bob', LT_ACCESS_KEY: 'bob-key' } }));
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(operations()).toEqual(['allocate']);
     expect(runnerCredentials()).toEqual(['alice', 'alice-key']);

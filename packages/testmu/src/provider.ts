@@ -5,7 +5,7 @@
  * holding them runs each session over TestMu AI's Appium hub.
  */
 
-import { readdir, rm, stat } from 'node:fs/promises';
+import { lstat, mkdir, readdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import type { DeviceLease, DeviceProvider, DeviceReleaseContext, DeviceRequest } from '@e2e-dev/mobile';
 import { createAgentDeviceClient } from 'agent-device';
@@ -24,6 +24,13 @@ const RUN_STATE_TTL_MS = 24 * 60 * 60_000;
 
 /** A run id, which names each run's directory under `stateDir`; nothing else there is pruned. */
 const RUN_DIR_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The file that marks a run's directory as the provider's: only a marked
+ * directory is ever pruned, since `stateDir` may be shared with other tools.
+ * Heartbeats keep it fresh while a run holds leases.
+ */
+const RUN_MARKER = '.e2e-testmu-run';
 
 /** The dashboard project sessions are grouped under when `project` is absent. */
 const DEFAULT_PROJECT = 'e2e';
@@ -101,8 +108,8 @@ export interface TestmuOptions {
   /**
    * Directory for the agent-device daemon each run starts, relative to the
    * project root. Defaults to `.e2e/testmu`. Each run keeps its own
-   * directory in it, and the first lease of a run removes earlier runs'
-   * directories last modified more than a day before.
+   * directory in it, marked as the provider's, and the first lease of a run
+   * removes earlier runs' marked directories unchanged for more than a day.
    */
   readonly stateDir?: string | undefined;
   /** Orientation the device starts in; absent, the device's default. */
@@ -204,6 +211,7 @@ export function testmu(options: TestmuOptions): DeviceProvider {
       const stateDir = join(baseDir, request.runId);
       pruning ??= pruneEarlierRuns(baseDir, request.runId);
       await pruning;
+      await markRun(stateDir);
       if (request.signal.aborted) throw new Error('cancelled before a lease was allocated');
       const leaseBackend: LeaseBackend = request.platform === 'ios' ? 'ios-instance' : 'android-instance';
       const selectors = {
@@ -267,9 +275,22 @@ export function testmu(options: TestmuOptions): DeviceProvider {
   };
 }
 
+/** Marks a run's directory as the provider's, creating it. Best effort: an unmarked directory is only never pruned. */
+async function markRun(stateDir: string): Promise<void> {
+  try {
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(join(stateDir, RUN_MARKER), '');
+  } catch {
+    // The daemon reports a state directory it cannot use.
+  }
+}
+
 /**
- * Removes the directories earlier runs left under `baseDir` once they are a
- * day old, never the current run's. Best effort: a failure leaves them.
+ * Removes the directories earlier runs left under `baseDir` once nothing in
+ * them has changed for a day: only directories named after a run id and
+ * holding the provider's marker, never the current run's. A run still going
+ * in another process stays, since its heartbeats touch the marker and its
+ * daemon writes its log. Best effort: a failure leaves them.
  */
 async function pruneEarlierRuns(baseDir: string, runId: string): Promise<void> {
   const cutoff = Date.now() - RUN_STATE_TTL_MS;
@@ -285,13 +306,19 @@ async function pruneEarlierRuns(baseDir: string, runId: string): Promise<void> {
       .map(async (name) => {
         const dir = join(baseDir, name);
         try {
-          const info = await stat(dir);
-          if (info.isDirectory() && info.mtimeMs < cutoff) await rm(dir, { recursive: true, force: true });
+          if (!(await lstat(dir)).isDirectory() || !(await lstat(join(dir, RUN_MARKER))).isFile()) return;
+          if ((await newestChange(dir)) < cutoff) await rm(dir, { recursive: true, force: true });
         } catch {
-          // Gone already, or not ours to remove.
+          // Not marked, gone already, or not ours to remove.
         }
       }),
   );
+}
+
+/** The latest modification time of a directory and of each entry directly in it. */
+async function newestChange(dir: string): Promise<number> {
+  const times = await Promise.all([dir, ...(await readdir(dir)).map((name) => join(dir, name))].map(async (path) => (await lstat(path)).mtimeMs));
+  return Math.max(...times);
 }
 
 /** Releases a lease through the daemon that granted it, which ends its TestMu AI session. A lease the daemon no longer knows counts as released. */
@@ -300,15 +327,19 @@ async function releaseLease({ stateDir, scope, credentials }: LeaseHandle): Prom
 }
 
 /**
- * Heartbeats a lease until the returned function is called. A command still
- * running does not keep its lease alive, so without this a lease can lapse
- * while the run holds it. A failed heartbeat is logged once and the next one
+ * Heartbeats a lease until the returned function is called, touching the
+ * run's marker so pruning never takes a run that is still going. A command
+ * still running does not keep its lease alive, so without this a lease can
+ * lapse while the run holds it. A failed heartbeat is logged once and the next one
  * tried; it never fails the run.
  */
 function keepAlive({ stateDir, scope, credentials }: LeaseHandle, log: (line: string) => void): () => void {
   const client = createAgentDeviceClient({ stateDir, session: 'heartbeat' });
   let warned = false;
+  const marker = join(stateDir, RUN_MARKER);
   const timer = setInterval(() => {
+    const now = new Date();
+    utimes(marker, now, now).catch(() => undefined);
     withDaemonCredentials(credentials, () => client.leases.heartbeat({ ...scope, ttlMs: LEASE_TTL_MS })).catch((cause: unknown) => {
       if (warned) return;
       warned = true;

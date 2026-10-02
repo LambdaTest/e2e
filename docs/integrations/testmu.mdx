@@ -290,10 +290,13 @@ can link another run's video; give such runs their own `build`, or leave
   starts the TestMu AI session, which installs `app`.
 - Keeps each run's directory, with its daemon's state and logs, after the
   run: the daemon exits on its own after 5 idle minutes, and its logs help
-  explain a failure. Before its first lease, a run removes the directories
-  of earlier runs under `stateDir` that were last modified more than 24
-  hours ago, never its own; only directories named after a run id are
-  removed, and a failure to remove one does not fail the lease.
+  explain a failure. The provider marks each run's directory as its own
+  with a `.e2e-testmu-run` file and touches it on every heartbeat. Before
+  its first lease, a run removes the marked directories of earlier runs
+  under `stateDir` in which nothing has changed for more than 24 hours,
+  never its own. A directory without the marker is never removed, so a
+  `stateDir` shared with other tools is safe, and a failure to remove one
+  does not fail the lease.
 - Keeps each lease alive while the run holds it. The provider allocates
   with agent-device's longest lease window, 10 minutes, and heartbeats the
   lease every 2 minutes, so a lease stays alive however long its session
