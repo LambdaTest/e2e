@@ -252,10 +252,13 @@ For an app started elsewhere, point `app.url` at it, literally or via
 
 ## Mobile targets
 
-`@e2e-dev/mobile` drives iOS simulators and Android emulators through
-[agent-device](https://github.com/callstack/agent-device); needs Xcode with a
-simulator runtime or the Android SDK with an emulator; run
-`npx agent-device doctor` once.
+`@e2e-dev/mobile` drives iOS simulators, Android emulators, and connected
+phones through [agent-device](https://github.com/callstack/agent-device);
+needs Xcode with a simulator runtime or the Android SDK with an emulator; run
+`npx agent-device doctor` once. Name a phone in `device` by the name
+`npx agent-device devices` lists, not its UDID or serial. On an iPhone, device
+settings (permissions, `clearState`, network, location, appearance,
+biometrics, keychain) and the clipboard are simulator-only.
 
 ```ts
 import type { E2EConfig } from 'e2e';
