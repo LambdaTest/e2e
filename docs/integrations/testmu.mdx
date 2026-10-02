@@ -191,16 +191,18 @@ test('Proverbial home screen', async ({ app, screen }) => {
 ## Sessions
 
 Each target leases up to `workers` devices (`--workers` overrides it), one
-per worker slot, before the run's clock starts. A session takes about 30 to
-75 seconds to start, allocation and app upload included. TestMu AI
-runs as many sessions at once as the plan allows, so keep `workers` times
-the number of TestMu AI targets within it.
+per worker slot, before the run's clock starts. Allocating a lease starts
+its TestMu AI session, which takes about 30 to 75 seconds, app upload
+included, so every slot is billed from the moment it is leased until the run
+ends, even when no test runs on it. TestMu AI runs as many sessions at once
+as the plan allows, so keep `workers` times the number of TestMu AI targets
+within it.
 
 The provider logs each lease as it is granted:
 
 ```text
 ℹ leasing 1 android device(s) from testmu
-ℹ testmu (1 of 1): lease 4f0c…: Galaxy S22 Ultra 5G, android 14 (virtual); the session starts on the first command
+ℹ testmu (1 of 1): lease 4f0c…: Galaxy S22 Ultra 5G, android 14 (virtual); session started
 ℹ testmu: leased 4f0c…
 ```
 
@@ -210,14 +212,15 @@ TestMu AI dashboard, under the project and build the options name.
 ## What the provider does
 
 - Starts one agent-device daemon per run under `stateDir/<run id>` and
-  allocates a `testmu` lease from it for each worker slot.
-- Keeps each lease alive while the run holds it. A lease asks for
-  agent-device's longest inactivity window, 10 minutes, and the provider
-  heartbeats it every 2 minutes, so a session that takes long to start keeps
-  its lease. A failed heartbeat is logged once and does not fail the run.
+  allocates a `testmu` lease from it for each worker slot. The allocation
+  starts the TestMu AI session, which installs `app`.
+- Keeps each lease alive while the run holds it. agent-device starts a
+  lease's inactivity window before a slow allocation returns, so the
+  provider asks for agent-device's longest window, 10 minutes, and
+  heartbeats the lease every 2 minutes. A failed heartbeat is logged once
+  and does not fail the run.
 - Hands the worker the lease scope and the device selectors as agent-device
-  client configuration. The worker's first command starts the TestMu AI
-  session from them, which installs `app`.
+  client configuration, so every command lands on the lease's session.
 - Releases each lease when the run ends, which ends its session. A lease
   is released once however often the engine asks, and a failed release can
   be tried again.

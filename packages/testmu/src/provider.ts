@@ -21,9 +21,10 @@ const DEFAULT_STATE_DIR = '.e2e/testmu';
 const DEFAULT_PROJECT = 'e2e';
 
 /**
- * The inactivity window each lease asks for, agent-device's longest. Its
- * 60-second default lapses while the worker's first command uploads the app
- * and starts the session, which can take longer on an iOS simulator.
+ * The inactivity window each lease asks for, agent-device's longest.
+ * agent-device starts a lease's window before the allocation that uploads the
+ * app and starts the session returns, so a slow one, as on an iOS simulator,
+ * can spend most of the 60-second default before the lease is granted.
  */
 const LEASE_TTL_MS = 10 * 60_000;
 
@@ -53,7 +54,7 @@ export interface TestmuOptions {
   /**
    * The build TestMu AI installs on every session: an `lt://` app id, an
    * `https` URL, or a local path, resolved against the project root and
-   * uploaded when the session starts.
+   * uploaded when the lease is allocated.
    */
   readonly app: string;
   /** `'virtual'` (default) for an emulator or simulator, `'real'` for a real device. */
@@ -89,8 +90,9 @@ interface LeaseHandle {
  * TestMu AI devices for `mobile({ device: testmu({ device, osVersion, app }) })`:
  * one hosted device per worker slot, leased when the run starts and released
  * when it ends. Each lease comes from an agent-device daemon the provider
- * starts for the run under `stateDir`; the worker's first command starts the
- * TestMu AI session, which installs `app`, and releasing the lease ends it.
+ * starts for the run under `stateDir`; allocating it starts the TestMu AI
+ * session, which installs `app`, so every slot is billed from the moment it
+ * is leased, whether or not a test runs on it, and releasing the lease ends it.
  * It authenticates with `LT_USERNAME` and `LT_ACCESS_KEY` from the run's
  * environment, and needs an agent-device with the `testmu` provider.
  */
@@ -155,8 +157,8 @@ export function testmu(options: TestmuOptions): DeviceProvider {
       heartbeats.set(scope.leaseId, keepAlive({ stateDir, scope }, request.log));
       try {
         if (request.signal.aborted) throw new Error('cancelled');
-        request.log(`lease ${scope.leaseId}: ${device}, ${request.platform} ${osVersion} (${deviceType}); the session starts on the first command`);
-        // The worker's client is created with these fields: the scope picks the lease, and the selectors start the session.
+        request.log(`lease ${scope.leaseId}: ${device}, ${request.platform} ${osVersion} (${deviceType}); session started`);
+        // The worker's client is created with these fields: the scope picks the lease, and the selectors match the session it holds.
         return { id: scope.leaseId, client: { stateDir, ...scope, ...selectors } };
       } catch (cause) {
         // The engine releases only leases `acquire` returned.
@@ -182,9 +184,10 @@ async function releaseLease({ stateDir, scope }: LeaseHandle): Promise<void> {
 
 /**
  * Heartbeats a lease until the returned function is called. A command still
- * running does not keep its lease alive, so without this a lease can lapse
- * while the worker's first command is starting the session. A failed
- * heartbeat is logged once and the next one tried; it never fails the run.
+ * running does not keep its lease alive, and the allocation may already have
+ * spent part of the lease's window, so without this a lease can lapse while
+ * the run holds it. A failed heartbeat is logged once and the next one tried;
+ * it never fails the run.
  */
 function keepAlive({ stateDir, scope }: LeaseHandle, log: (line: string) => void): () => void {
   const client = createAgentDeviceClient({ stateDir, session: 'heartbeat' });

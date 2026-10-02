@@ -177,7 +177,7 @@ describe('testmu()', () => {
     expect(JSON.parse(json)).toEqual(lease);
     expect(Buffer.byteLength(json)).toBeLessThan(1024);
     expect(json).not.toContain('lt-key');
-    expect(req.lines).toEqual(['lease lease-1: Galaxy S22 Ultra 5G, android 14 (virtual); the session starts on the first command']);
+    expect(req.lines).toEqual(['lease lease-1: Galaxy S22 Ultra 5G, android 14 (virtual); session started']);
   });
 
   it('shares the run\'s credentials with the daemon it starts', async () => {

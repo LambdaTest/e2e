@@ -41,9 +41,10 @@ export default {
 
 It authenticates with `LT_USERNAME` and `LT_ACCESS_KEY` from the run's
 environment. Each worker slot leases one device from an agent-device daemon
-the provider starts for the run; the worker's first command starts the
-TestMu AI session, which installs `app`, and the lease is released when the
-run ends, which ends the session.
+the provider starts for the run. Allocating the lease starts the TestMu AI
+session, which installs `app`, so every slot is billed from the moment it is
+leased, even when no test runs on it. The lease is released when the run
+ends, which ends the session.
 
 - `device` and `osVersion` must match TestMu AI's catalog exactly: `18.0`
   for a virtual iOS device, `18` for a real one, `14` on Android.
