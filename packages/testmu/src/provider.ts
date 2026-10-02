@@ -5,7 +5,8 @@
  * holding them runs each session over TestMu AI's Appium hub.
  */
 
-import { isAbsolute, resolve } from 'node:path';
+import { readdir, rm, stat } from 'node:fs/promises';
+import { isAbsolute, join, resolve } from 'node:path';
 import type { DeviceLease, DeviceProvider, DeviceRequest } from '@e2e-dev/mobile';
 import { createAgentDeviceClient } from 'agent-device';
 import { ConfigurationError, rejectUnknownKeys, type ProviderRecordContext, type ProviderRecording } from 'e2e/engine';
@@ -17,6 +18,12 @@ const PROVIDER = 'testmu';
 
 /** Where each run's daemon keeps its state, under the project root. */
 const DEFAULT_STATE_DIR = '.e2e/testmu';
+
+/** How long an earlier run's directory under `stateDir` is kept: its daemon exits after 5 idle minutes, and its logs help with a failure until then. */
+const RUN_STATE_TTL_MS = 24 * 60 * 60_000;
+
+/** A run id, which names each run's directory under `stateDir`; nothing else there is pruned. */
+const RUN_DIR_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** The dashboard project sessions are grouped under when `project` is absent. */
 const DEFAULT_PROJECT = 'e2e';
@@ -88,7 +95,12 @@ export interface TestmuOptions {
    * Defaults to `e2e-<run id>-<target>-<slot>`. Slots count from 1.
    */
   readonly sessionName?: string | undefined;
-  /** Directory for the agent-device daemon each run starts, relative to the project root. Defaults to `.e2e/testmu`. */
+  /**
+   * Directory for the agent-device daemon each run starts, relative to the
+   * project root. Defaults to `.e2e/testmu`. Each run keeps its own
+   * directory in it, and the first lease of a run removes earlier runs'
+   * directories last modified more than a day before.
+   */
   readonly stateDir?: string | undefined;
   /** Orientation the device starts in; absent, the device's default. */
   readonly orientation?: 'portrait' | 'landscape' | undefined;
@@ -161,6 +173,7 @@ export function testmu(options: TestmuOptions): DeviceProvider {
   const releases = new Map<string, Promise<void>>();
   /** Stops each held lease's heartbeat, by lease id. */
   const heartbeats = new Map<string, () => void>();
+  let pruning: Promise<void> | undefined;
   const release = (id: string, handle: LeaseHandle): Promise<void> => {
     heartbeats.get(id)?.();
     heartbeats.delete(id);
@@ -178,8 +191,11 @@ export function testmu(options: TestmuOptions): DeviceProvider {
     async acquire(request: DeviceRequest): Promise<DeviceLease> {
       if (request.appPath !== undefined) throw new Error("TestMu AI installs the app from `app`; leave the target's `app.appPath` out");
       shareWithDaemon(testmuCredentials(request.env));
+      const baseDir = resolve(request.projectRoot, options.stateDir ?? DEFAULT_STATE_DIR);
+      const stateDir = join(baseDir, request.runId);
+      pruning ??= pruneEarlierRuns(baseDir, request.runId);
+      await pruning;
       if (request.signal.aborted) throw new Error('cancelled before a lease was allocated');
-      const stateDir = resolve(request.projectRoot, options.stateDir ?? DEFAULT_STATE_DIR, request.runId);
       const leaseBackend: LeaseBackend = request.platform === 'ios' ? 'ios-instance' : 'android-instance';
       const selectors = {
         platform: request.platform,
@@ -235,6 +251,33 @@ export function testmu(options: TestmuOptions): DeviceProvider {
       };
     },
   };
+}
+
+/**
+ * Removes the directories earlier runs left under `baseDir` once they are a
+ * day old, never the current run's. Best effort: a failure leaves them.
+ */
+async function pruneEarlierRuns(baseDir: string, runId: string): Promise<void> {
+  const cutoff = Date.now() - RUN_STATE_TTL_MS;
+  let entries: string[];
+  try {
+    entries = await readdir(baseDir);
+  } catch {
+    return;
+  }
+  await Promise.all(
+    entries
+      .filter((name) => name !== runId && RUN_DIR_NAME.test(name))
+      .map(async (name) => {
+        const dir = join(baseDir, name);
+        try {
+          const info = await stat(dir);
+          if (info.isDirectory() && info.mtimeMs < cutoff) await rm(dir, { recursive: true, force: true });
+        } catch {
+          // Gone already, or not ours to remove.
+        }
+      }),
+  );
 }
 
 /** Releases a lease through the daemon that granted it, which ends its TestMu AI session. A lease the daemon no longer knows counts as released. */

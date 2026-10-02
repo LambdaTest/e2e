@@ -168,7 +168,7 @@ device a signed `.ipa`. Real devices need an agent-device release whose
 | `project`     | `'e2e'`         | Dashboard project the sessions are grouped under. |
 | `build`       | the run id      | Dashboard build the sessions are grouped under. |
 | `sessionName` | `e2e-<run id>-<target>-<slot>` | Name of each session on the dashboard. With more than one worker slot, `-<slot>` is appended, so every slot's session has its own name; slots count from 1. Give targets that share a `build` different names. |
-| `stateDir`    | `'.e2e/testmu'` | Directory for the agent-device daemon each run starts, relative to the directory of `e2e.config.ts`. Keep it out of version control. |
+| `stateDir`    | `'.e2e/testmu'` | Directory for the agent-device daemon each run starts, relative to the directory of `e2e.config.ts`. Keep it out of version control. See [What the provider does](#what-the-provider-does) for how long a run's directory is kept. |
 | `orientation` | the device's    | `'portrait'` or `'landscape'`: the orientation the device starts in. |
 | `geoLocation` | TestMu AI's     | Country the device's IP address geolocates to, as a country code TestMu AI takes (`'US'`, `'FR'`). |
 | `timezone`    | the device's    | The device's time zone, as TestMu AI takes it (`'UTC+05:30'`). |
@@ -254,6 +254,12 @@ its build and name when the attempt stops recording. It reads the API at
 - Starts one agent-device daemon per run under `stateDir/<run id>` and
   allocates a `testmu` lease from it for each worker slot. The allocation
   starts the TestMu AI session, which installs `app`.
+- Keeps each run's directory, with its daemon's state and logs, after the
+  run: the daemon exits on its own after 5 idle minutes, and its logs help
+  explain a failure. Before its first lease, a run removes the directories
+  of earlier runs under `stateDir` that were last modified more than 24
+  hours ago, never its own; only directories named after a run id are
+  removed, and a failure to remove one does not fail the lease.
 - Keeps each lease alive while the run holds it. agent-device starts a
   lease's inactivity window before a slow allocation returns, so the
   provider asks for agent-device's longest window, 10 minutes, and

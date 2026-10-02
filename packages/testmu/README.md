@@ -59,7 +59,9 @@ ends, which ends the session.
 - `orientation` (`'portrait'` or `'landscape'`), `geoLocation`, `timezone`,
   `language`, `locale`, and `appiumVersion` set up the device when the
   session starts.
-- `stateDir` (default `.e2e/testmu`) holds each run's daemon.
+- `stateDir` (default `.e2e/testmu`) holds each run's daemon, in a
+  directory per run that is kept after the run for its logs. A run removes
+  earlier runs' directories once they are more than 24 hours old.
 
 Sessions run over TestMu AI's Appium hub, so agent-device's device settings,
 system alerts, recording, device logs, and port reverse are not available
