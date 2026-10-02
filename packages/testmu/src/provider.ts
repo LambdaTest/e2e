@@ -8,8 +8,9 @@
 import { isAbsolute, resolve } from 'node:path';
 import type { DeviceLease, DeviceProvider, DeviceRequest } from '@e2e-dev/mobile';
 import { createAgentDeviceClient } from 'agent-device';
-import { ConfigurationError, rejectUnknownKeys } from 'e2e/engine';
+import { ConfigurationError, rejectUnknownKeys, type ProviderRecordContext, type ProviderRecording } from 'e2e/engine';
 import { shareWithDaemon, testmuCredentials } from './credentials.ts';
+import { sessionVideoUrl, testmuApiEndpoint, type SessionRef } from './sessions.ts';
 
 /** agent-device's name for TestMu AI, as the lease provider and the tenant. */
 const PROVIDER = 'testmu';
@@ -127,7 +128,8 @@ interface LeaseHandle {
  * starts for the run under `stateDir`; allocating it starts the TestMu AI
  * session, which installs `app`, so every slot is billed from the moment it
  * is leased, whether or not a test runs on it, and releasing the lease ends it.
- * It authenticates with `LT_USERNAME` and `LT_ACCESS_KEY` from the run's
+ * An attempt that records video links TestMu AI's recording of the whole
+ * session, found by the lease's build and session name. It authenticates with `LT_USERNAME` and `LT_ACCESS_KEY` from the run's
  * environment, and needs an agent-device with the `testmu` provider.
  */
 export function testmu(options: TestmuOptions): DeviceProvider {
@@ -221,6 +223,17 @@ export function testmu(options: TestmuOptions): DeviceProvider {
       if (handle === undefined) throw new Error(`lease ${lease.id} carries no agent-device lease scope to release`);
       await release(lease.id, handle);
     },
+    // Runs in the worker, from the lease alone. TestMu AI records the whole session, not the attempt.
+    async record(lease: DeviceLease, context: ProviderRecordContext): Promise<ProviderRecording> {
+      const session = sessionRef(lease);
+      if (session === undefined) throw new Error(`lease ${lease.id} carries no TestMu AI build and session name to find its recording by`);
+      const credentials = testmuCredentials(context.env);
+      const endpoint = testmuApiEndpoint(context.env);
+      return {
+        startedAt: new Date().toISOString(),
+        stop: async ({ signal }) => ({ url: await sessionVideoUrl(endpoint, credentials, session, signal), mediaType: 'video/mp4' }),
+      };
+    },
   };
 }
 
@@ -285,6 +298,15 @@ function leaseHandle(lease: DeviceLease): LeaseHandle | undefined {
     return undefined;
   }
   return { stateDir, scope: { tenant, runId, leaseId, leaseBackend, leaseProvider } };
+}
+
+/** The build and session name `acquire` put on a lease's `client`, when they are there. */
+function sessionRef(lease: DeviceLease): SessionRef | undefined {
+  const client = lease.client as Record<string, unknown> | undefined;
+  const build = client?.['providerBuild'];
+  const sessionName = client?.['providerSessionName'];
+  if (typeof build !== 'string' || build === '' || typeof sessionName !== 'string' || sessionName === '') return undefined;
+  return { build, sessionName };
 }
 
 function messageOf(cause: unknown): string {

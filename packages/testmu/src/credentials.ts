@@ -8,7 +8,7 @@
 const LT_USERNAME = 'LT_USERNAME';
 const LT_ACCESS_KEY = 'LT_ACCESS_KEY';
 
-interface TestmuCredentials {
+export interface TestmuCredentials {
   readonly username: string;
   readonly accessKey: string;
 }

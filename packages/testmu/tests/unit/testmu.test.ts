@@ -2,7 +2,7 @@
  * `testmu()` against a stubbed agent-device client: the options it refuses,
  * the lease it allocates and hands the worker, the credentials it reads and
  * shares with the daemon, the heartbeat that keeps it alive, and the release
- * on every exit path.
+ * on every exit path. `recording.test.ts` covers `record`.
  */
 
 import { join } from 'node:path';
@@ -95,10 +95,10 @@ const operations = () => daemon.calls.map((call) => call.operation);
 const MINUTE = 60_000;
 
 describe('testmu()', () => {
-  it('is a device provider named testmu that leaves recording to agent-device', () => {
+  it("is a device provider named testmu that records through TestMu AI's own session video", () => {
     const provider = testmu(options);
     expect(provider.name).toBe('testmu');
-    expect(provider.record).toBeUndefined();
+    expect(provider.record).toBeTypeOf('function');
   });
 
   it('allocates an Android lease from a daemon under the project root, with the device selectors and dashboard labels', async () => {

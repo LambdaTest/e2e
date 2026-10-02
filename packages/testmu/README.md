@@ -63,7 +63,8 @@ ends, which ends the session.
 
 Sessions run over TestMu AI's Appium hub, so agent-device's device settings,
 system alerts, recording, device logs, and port reverse are not available
-there. TestMu AI records every session itself.
+there. An attempt that records video links TestMu AI's recording of the
+whole session instead, found by the session's build and name.
 
 Full documentation lives at [e2e.tester.army/docs/integrations/testmu](https://e2e.tester.army/docs/integrations/testmu).
 

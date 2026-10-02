@@ -219,6 +219,36 @@ The provider logs each lease as it is granted:
 The video, device logs, and network logs of every session are on the
 TestMu AI dashboard, under the project and build the options name.
 
+## Recordings
+
+An attempt that records [video](/reference/config#video) links TestMu AI's
+recording of its session in the report, instead of recording through
+agent-device, which cannot record over TestMu AI's Appium hub:
+
+```ts title="e2e.config.ts"
+export default {
+  targets: [
+    {
+      name: 'android-emulator',
+      engine: mobile({
+        platform: 'android',
+        device: testmu({ device: 'Galaxy S22 Ultra 5G', osVersion: '14', app: apk }),
+      }),
+      app: { bundleId: 'com.lambdatest.proverbial' },
+      video: 'retain-on-failure',
+    },
+  ],
+} satisfies E2EConfig;
+```
+
+TestMu AI records the whole session, from the lease to the end of the run,
+so the link is the same video for every attempt on that worker slot. The
+report records when the attempt started recording, to find the attempt in
+it. The runner never downloads the video; the link is the URL TestMu AI's
+sessions API returns for the session, and the provider finds the session by
+its build and name when the attempt stops recording. It reads the API at
+`TESTMU_API_ENDPOINT` when that is set, as agent-device does.
+
 ## What the provider does
 
 - Starts one agent-device daemon per run under `stateDir/<run id>` and
@@ -245,9 +275,8 @@ tests:
 
 - `device` settings: permissions, location, network, and appearance.
 - System alerts.
-- Recording through agent-device. Leave [`video`](/reference/config#video)
-  off for these targets. TestMu AI records every session itself, and the
-  video and device logs are on its dashboard.
+- Recording through agent-device. An attempt's video links TestMu AI's
+  recording of the session instead; see [Recordings](#recordings).
 - Device logs through agent-device; read them on the dashboard.
 - Port reverse. To reach a server on your machine or network, use TestMu
   AI Tunnel.

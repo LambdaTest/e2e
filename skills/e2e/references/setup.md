@@ -311,6 +311,7 @@ export default {
   exactly, TestMu AI installs `app` (omit `app.appPath`), it reads
   `LT_USERNAME` and `LT_ACCESS_KEY`, and needs an agent-device with the
   `testmu` provider shared with `@e2e-dev/mobile` (override its pin).
+  An attempt's video links TestMu AI's recording of the whole session.
 - Only a control that appeared or moved with the previous action waits out
   `transition` (default 500 ms); agent actions settle `settle` ms (default
   150) before the next observation, `settle: false` skips it.
