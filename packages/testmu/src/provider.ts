@@ -63,7 +63,11 @@ export interface TestmuOptions {
   readonly project?: string | undefined;
   /** Dashboard build the sessions are grouped under. Defaults to the run id. */
   readonly build?: string | undefined;
-  /** Name of every session on the dashboard; absent, TestMu AI names it. */
+  /**
+   * Name of every session on the dashboard, with `-<slot>` appended when the
+   * target leases more than one device, so each slot's session has its own.
+   * Defaults to `e2e-<run id>-<target>-<slot>`. Slots count from 1.
+   */
   readonly sessionName?: string | undefined;
   /** Directory for the agent-device daemon each run starts, relative to the project root. Defaults to `.e2e/testmu`. */
   readonly stateDir?: string | undefined;
@@ -142,7 +146,7 @@ export function testmu(options: TestmuOptions): DeviceProvider {
         providerDeviceType: deviceType,
         providerProject: project ?? DEFAULT_PROJECT,
         providerBuild: build ?? request.runId,
-        ...(sessionName === undefined ? {} : { providerSessionName: sessionName }),
+        providerSessionName: slotSessionName(sessionName, request),
       };
       // Not cancellable: the daemon may grant the lease after an interrupt, and only a lease this returns or releases is ever released.
       const granted = await createAgentDeviceClient({ stateDir, session: `lease-${request.slot}` }).leases.allocate({
@@ -157,7 +161,7 @@ export function testmu(options: TestmuOptions): DeviceProvider {
       heartbeats.set(scope.leaseId, keepAlive({ stateDir, scope }, request.log));
       try {
         if (request.signal.aborted) throw new Error('cancelled');
-        request.log(`lease ${scope.leaseId}: ${device}, ${request.platform} ${osVersion} (${deviceType}); session started`);
+        request.log(`lease ${scope.leaseId}: ${device}, ${request.platform} ${osVersion} (${deviceType}); session ${selectors.providerSessionName} started`);
         // The worker's client is created with these fields: the scope picks the lease, and the selectors match the session it holds.
         return { id: scope.leaseId, client: { stateDir, ...scope, ...selectors } };
       } catch (cause) {
@@ -205,6 +209,15 @@ function keepAlive({ stateDir, scope }: LeaseHandle, log: (line: string) => void
   }, HEARTBEAT_INTERVAL_MS);
   timer.unref();
   return () => clearInterval(timer);
+}
+
+/**
+ * The dashboard name of a slot's session, unique among the run's slots of the
+ * target so `record` can find the session by it within its build.
+ */
+function slotSessionName(sessionName: string | undefined, { runId, targetName, slot, slots }: DeviceRequest): string {
+  if (sessionName === undefined) return `e2e-${runId}-${targetName}-${slot + 1}`;
+  return slots > 1 ? `${sessionName}-${slot + 1}` : sessionName;
 }
 
 /** `app` as the daemon reads it: an `lt://` id or URL as written, a local path resolved against the project root, never the daemon's working directory. */

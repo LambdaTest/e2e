@@ -167,7 +167,7 @@ device a signed `.ipa`. Real devices need an agent-device release whose
 | `deviceType`  | `'virtual'`     | `'virtual'` for an emulator or simulator, `'real'` for a real device. |
 | `project`     | `'e2e'`         | Dashboard project the sessions are grouped under. |
 | `build`       | the run id      | Dashboard build the sessions are grouped under. |
-| `sessionName` | TestMu AI's     | Name of every session on the dashboard. |
+| `sessionName` | `e2e-<run id>-<target>-<slot>` | Name of each session on the dashboard. With more than one worker slot, `-<slot>` is appended, so every slot's session has its own name; slots count from 1. Give targets that share a `build` different names. |
 | `stateDir`    | `'.e2e/testmu'` | Directory for the agent-device daemon each run starts, relative to the directory of `e2e.config.ts`. Keep it out of version control. |
 
 An option not in this table, a missing or empty `device`, `osVersion`, or
@@ -202,7 +202,7 @@ The provider logs each lease as it is granted:
 
 ```text
 ℹ leasing 1 android device(s) from testmu
-ℹ testmu (1 of 1): lease 4f0c…: Galaxy S22 Ultra 5G, android 14 (virtual); session started
+ℹ testmu (1 of 1): lease 4f0c…: Galaxy S22 Ultra 5G, android 14 (virtual); session e2e-0199…-android-emulator-1 started
 ℹ testmu: leased 4f0c…
 ```
 

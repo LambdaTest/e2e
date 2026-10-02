@@ -53,7 +53,9 @@ ends, which ends the session.
   `app.appPath` out.
 - `deviceType: 'real'` picks a real device (default `'virtual'`).
 - `project` (default `e2e`), `build` (default the run id), and `sessionName`
-  label the sessions on the dashboard.
+  (default `e2e-<run id>-<target>-<slot>`) label the sessions on the
+  dashboard. A given `sessionName` gets `-<slot>` appended when the target
+  has more than one worker slot, so each slot's session has its own name.
 - `stateDir` (default `.e2e/testmu`) holds each run's daemon.
 
 Sessions run over TestMu AI's Appium hub, so agent-device's device settings,

@@ -120,6 +120,7 @@ describe('testmu()', () => {
           providerDeviceType: 'virtual',
           providerProject: 'e2e',
           providerBuild: 'run-1',
+          providerSessionName: 'e2e-run-1-android-2',
           ttlMs: 10 * MINUTE,
         },
       },
@@ -140,8 +141,17 @@ describe('testmu()', () => {
       providerDeviceType: 'real',
       providerProject: 'shop',
       providerBuild: 'nightly',
-      providerSessionName: 'checkout',
+      providerSessionName: 'checkout-1',
     });
+  });
+
+  it("names each slot's session after the run, the target, and the slot, and keeps a given name unique per slot", async () => {
+    const provider = testmu(options);
+    await provider.acquire(request({ runId: 'run-7', targetName: 'pixel', slot: 0, slots: 3 }));
+    await provider.acquire(request({ runId: 'run-7', targetName: 'pixel', slot: 2, slots: 3 }));
+    await testmu({ ...options, sessionName: 'checkout' }).acquire(request({ slot: 2, slots: 3 }));
+    await testmu({ ...options, sessionName: 'checkout' }).acquire(request({ slot: 0, slots: 1 }));
+    expect(daemon.calls.map((call) => call.options['providerSessionName'])).toEqual(['e2e-run-7-pixel-1', 'e2e-run-7-pixel-3', 'checkout-3', 'checkout']);
   });
 
   it('resolves a local build against the project root, never the working directory', async () => {
@@ -171,13 +181,14 @@ describe('testmu()', () => {
         providerDeviceType: 'virtual',
         providerProject: 'e2e',
         providerBuild: 'run-1',
+        providerSessionName: 'e2e-run-1-android-1',
       },
     });
     const json = JSON.stringify(lease);
     expect(JSON.parse(json)).toEqual(lease);
     expect(Buffer.byteLength(json)).toBeLessThan(1024);
     expect(json).not.toContain('lt-key');
-    expect(req.lines).toEqual(['lease lease-1: Galaxy S22 Ultra 5G, android 14 (virtual); session started']);
+    expect(req.lines).toEqual(['lease lease-1: Galaxy S22 Ultra 5G, android 14 (virtual); session e2e-run-1-android-1 started']);
   });
 
   it('shares the run\'s credentials with the daemon it starts', async () => {
