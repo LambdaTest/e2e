@@ -29,10 +29,10 @@ const RUN_DIR_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 const DEFAULT_PROJECT = 'e2e';
 
 /**
- * The inactivity window each lease asks for, agent-device's longest.
- * agent-device starts a lease's window before the allocation that uploads the
- * app and starts the session returns, so a slow one, as on an iOS simulator,
- * can spend most of the 60-second default before the lease is granted.
+ * The inactivity window each lease asks for, agent-device's longest. With
+ * the heartbeat, a lease stays alive however long its session takes to
+ * start, whether agent-device starts the window when the allocation begins
+ * or when it completes.
  */
 const LEASE_TTL_MS = 10 * 60_000;
 
@@ -301,10 +301,9 @@ async function releaseLease({ stateDir, scope, credentials }: LeaseHandle): Prom
 
 /**
  * Heartbeats a lease until the returned function is called. A command still
- * running does not keep its lease alive, and the allocation may already have
- * spent part of the lease's window, so without this a lease can lapse while
- * the run holds it. A failed heartbeat is logged once and the next one tried;
- * it never fails the run.
+ * running does not keep its lease alive, so without this a lease can lapse
+ * while the run holds it. A failed heartbeat is logged once and the next one
+ * tried; it never fails the run.
  */
 function keepAlive({ stateDir, scope, credentials }: LeaseHandle, log: (line: string) => void): () => void {
   const client = createAgentDeviceClient({ stateDir, session: 'heartbeat' });

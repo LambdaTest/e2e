@@ -284,11 +284,11 @@ agent-device does.
   of earlier runs under `stateDir` that were last modified more than 24
   hours ago, never its own; only directories named after a run id are
   removed, and a failure to remove one does not fail the lease.
-- Keeps each lease alive while the run holds it. agent-device starts a
-  lease's inactivity window before a slow allocation returns, so the
-  provider asks for agent-device's longest window, 10 minutes, and
-  heartbeats the lease every 2 minutes. A failed heartbeat is logged once
-  and does not fail the run.
+- Keeps each lease alive while the run holds it. The provider allocates
+  with agent-device's longest lease window, 10 minutes, and heartbeats the
+  lease every 2 minutes, so a lease stays alive however long its session
+  takes to start, on any agent-device version. A failed heartbeat is logged
+  once and does not fail the run.
 - Hands the worker the lease scope and the device selectors as agent-device
   client configuration, so every command lands on the lease's session.
 - Releases each lease when the run ends, which ends its session. A lease
