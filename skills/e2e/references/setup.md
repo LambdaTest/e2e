@@ -254,8 +254,9 @@ For an app started elsewhere, point `app.url` at it, literally or via
 
 `@e2e-dev/mobile` drives iOS simulators, Android emulators, and connected
 phones through [agent-device](https://github.com/callstack/agent-device);
-needs Xcode with a simulator runtime or the Android SDK with an emulator; run
-`npx agent-device doctor` once. Name a phone in `device` by the name
+needs Xcode with a simulator runtime or the Android SDK with an emulator (a
+phone needs Xcode with Developer Mode and runner signing, or adb with USB
+debugging authorized); run `npx agent-device doctor` once. Name a phone in `device` by the name
 `npx agent-device devices` lists, not its UDID or serial. On an iPhone, device
 settings (permissions, `clearState`, network, location, appearance,
 biometrics, keychain) and the clipboard are simulator-only.
@@ -289,7 +290,7 @@ export default {
   arguments reach the app process (iOS) or `am start` (Android), permissions
   are set first.
 - One worker per device. No `device`: every booted simulator or emulator of
-  the platform is the pool, up to `workers` (none booted: agent-device boots
+  the platform, and every connected phone, is the pool, up to `workers` (none booted: agent-device boots
   one); one `device`: one worker whatever `workers` says; a list (`device:
   ['iPhone 17', 'iPhone 17 Pro']`): an explicit pool. Devices boot in
   `prepare`, before the run's clock. Two sessions on one device fight over
