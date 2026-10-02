@@ -143,8 +143,9 @@ where a daemon the call starts reads them. Once no such call is running, it
 puts back the values `process.env` had before, unless the host changed them
 in the meantime, so the credentials do not stay there for other child
 processes of a long-lived host. In a host that runs several runs with
-different credentials at once, their daemon calls take turns, so no daemon
-starts with another run's credentials.
+different credentials at once, their daemon calls take turns, and one run's
+slow allocation can delay another run's heartbeats; run one TestMu AI
+account per process where you can.
 
 ## Install the app
 
@@ -299,8 +300,8 @@ can link another run's video; give such runs their own `build`, or leave
   does not fail the lease.
 - Keeps each lease alive while the run holds it. The provider allocates
   with agent-device's longest lease window, 10 minutes, and heartbeats the
-  lease every 2 minutes, so a lease stays alive however long its session
-  takes to start, on any agent-device version. A failed heartbeat is logged
+  lease every 2 minutes once it is granted, so a session that takes up to
+  10 minutes to start keeps its lease on any agent-device version. A failed heartbeat is logged
   once and does not fail the run.
 - Hands the worker the lease scope and the device selectors as agent-device
   client configuration, so every command lands on the lease's session.

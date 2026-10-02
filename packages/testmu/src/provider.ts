@@ -36,10 +36,10 @@ const RUN_MARKER = '.e2e-testmu-run';
 const DEFAULT_PROJECT = 'e2e';
 
 /**
- * The inactivity window each lease asks for, agent-device's longest. With
- * the heartbeat, a lease stays alive however long its session takes to
- * start, whether agent-device starts the window when the allocation begins
- * or when it completes.
+ * The inactivity window each lease asks for, agent-device's longest, so a
+ * session that takes up to 10 minutes to start keeps its lease whether
+ * agent-device starts the window when the allocation begins or when it
+ * completes; the heartbeat keeps it alive after that.
  */
 const LEASE_TTL_MS = 10 * 60_000;
 
