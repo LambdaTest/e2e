@@ -450,14 +450,23 @@ describe('testmu()', () => {
     );
   });
 
-  it.each(['geoLocation', 'timezone', 'language', 'locale', 'appiumVersion'] as const)('refuses an empty or non-string `%s` with INVALID_CONFIG', (key) => {
-    expect(() => testmu({ ...options, [key]: ' ' })).toThrow(expect.objectContaining({ code: 'INVALID_CONFIG', message: `testmu: \`${key}\` must be a non-empty string` }));
+  it.each(['orientation', 'geoLocation', 'timezone', 'language', 'locale', 'appiumVersion'] as const)('refuses an empty or non-string `%s` with INVALID_CONFIG', (key) => {
+    expect(() => testmu({ ...options, [key]: ' ' } as unknown as TestmuOptions)).toThrow(expect.objectContaining({ code: 'INVALID_CONFIG', message: `testmu: \`${key}\` must be a non-empty string` }));
     expect(() => testmu({ ...options, [key]: 2 } as unknown as TestmuOptions)).toThrow(expect.objectContaining({ code: 'INVALID_CONFIG' }));
+    expect(() => testmu({ ...options, [key]: null } as unknown as TestmuOptions)).toThrow(expect.objectContaining({ code: 'INVALID_CONFIG' }));
   });
 
-  it('refuses a device type other than virtual or real', () => {
-    expect(() => testmu({ ...options, deviceType: 'emulator' as 'virtual' })).toThrow(
-      expect.objectContaining({ code: 'INVALID_CONFIG', message: 'testmu: `deviceType` must be \'virtual\' or \'real\', not "emulator"' }),
+  it.each(['emulator', null])('refuses a device type other than virtual or real (%j)', (deviceType) => {
+    expect(() => testmu({ ...options, deviceType } as unknown as TestmuOptions)).toThrow(
+      expect.objectContaining({ code: 'INVALID_CONFIG', message: `testmu: \`deviceType\` must be 'virtual' or 'real', not ${JSON.stringify(deviceType)}` }),
     );
+  });
+
+  it.each(['project', 'build', 'sessionName', 'stateDir'] as const)('refuses an empty or non-string `%s` with INVALID_CONFIG', (key) => {
+    for (const value of [' ', 1, null]) {
+      expect(() => testmu({ ...options, [key]: value } as unknown as TestmuOptions)).toThrow(
+        expect.objectContaining({ code: 'INVALID_CONFIG', message: `testmu: \`${key}\` must be a non-empty string` }),
+      );
+    }
   });
 });

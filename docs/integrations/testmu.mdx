@@ -198,8 +198,9 @@ The device features, `orientation` through `appiumVersion`, are set when the
 session starts and hold for the whole session; a test cannot change them.
 
 An option not in this table, a missing or empty `device`, `osVersion`, or
-`app`, another `deviceType` or `orientation`, or an empty device feature
-fails the config load with `INVALID_CONFIG`.
+`app`, another `deviceType` or `orientation`, or any other option given as
+something other than a non-empty string fails the config load with
+`INVALID_CONFIG`.
 
 ## Write a test
 

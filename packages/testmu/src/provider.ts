@@ -53,6 +53,9 @@ const DEVICE_FEATURES = {
   appiumVersion: 'providerAppiumVersion',
 } as const satisfies Partial<Record<keyof TestmuOptions, string>>;
 
+/** The options that are strings when given, checked at config load. */
+const OPTIONAL_STRING_KEYS = ['project', 'build', 'sessionName', 'stateDir', ...(Object.keys(DEVICE_FEATURES) as (keyof typeof DEVICE_FEATURES)[])] as const;
+
 /** Every option `testmu()` takes, kept equal to `TestmuOptions` by the compiler. */
 const OPTION_KEYS: readonly string[] = Object.keys({
   device: true,
@@ -155,21 +158,24 @@ export function testmu(options: TestmuOptions): DeviceProvider {
       throw new ConfigurationError('INVALID_CONFIG', `testmu: \`${key}\` is required, as a non-empty string`);
     }
   }
-  const deviceType = options.deviceType ?? 'virtual';
+  // Only an absent value takes the default: `null` from a JavaScript config is refused like any other.
+  const deviceType = options.deviceType === undefined ? 'virtual' : options.deviceType;
   if (!DEVICE_TYPES.has(deviceType)) {
     throw new ConfigurationError('INVALID_CONFIG', `testmu: \`deviceType\` must be 'virtual' or 'real', not ${JSON.stringify(deviceType)}`);
   }
-  const deviceFeatures: Record<string, string> = {};
-  for (const [key, leaseKey] of Object.entries(DEVICE_FEATURES)) {
-    const value: unknown = options[key as keyof typeof DEVICE_FEATURES];
-    if (value === undefined) continue;
-    if (typeof value !== 'string' || value.trim() === '') {
+  for (const key of OPTIONAL_STRING_KEYS) {
+    const value: unknown = options[key];
+    if (value !== undefined && (typeof value !== 'string' || value.trim() === '')) {
       throw new ConfigurationError('INVALID_CONFIG', `testmu: \`${key}\` must be a non-empty string`);
     }
-    if (key === 'orientation' && !ORIENTATIONS.has(value)) {
-      throw new ConfigurationError('INVALID_CONFIG', `testmu: \`orientation\` must be 'portrait' or 'landscape', not ${JSON.stringify(value)}`);
-    }
-    deviceFeatures[leaseKey] = value;
+  }
+  if (options.orientation !== undefined && !ORIENTATIONS.has(options.orientation)) {
+    throw new ConfigurationError('INVALID_CONFIG', `testmu: \`orientation\` must be 'portrait' or 'landscape', not ${JSON.stringify(options.orientation)}`);
+  }
+  const deviceFeatures: Record<string, string> = {};
+  for (const [key, leaseKey] of Object.entries(DEVICE_FEATURES)) {
+    const value = options[key as keyof typeof DEVICE_FEATURES];
+    if (value !== undefined) deviceFeatures[leaseKey] = value;
   }
   const { device, osVersion, app, project, build, sessionName } = options;
   /** One release per lease, shared by every caller: the engine's, and `acquire`'s own after a failure. */
