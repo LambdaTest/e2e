@@ -115,9 +115,13 @@ lists them: a virtual iOS device takes a version like `18.0`, a real iOS
 device one like `18`, and Android one like `14`. TestMu AI checks them when
 the session starts and refuses a name or version it does not list.
 
-Keep `app.bundleId`: TestMu AI installs the app when the session starts,
-and `app.open()` launches the installed bundle id or package, not the upload
-name. Leave `app.appPath` out; a target that names one fails its lease.
+`app` is required: the provider hands the build to TestMu AI, which
+uploads a local one and installs it when the session starts. Leave the
+target's `app.appPath` out; the provider refuses it on purpose, so a target
+that names one fails its lease instead of installing the build twice.
+`device.installApp()` with a path still installs a build during a test.
+Keep `app.bundleId`: `app.open()` launches the installed bundle id or
+package, not the upload name.
 
 ## Authenticate
 
@@ -128,8 +132,9 @@ either, the lease fails before anything starts, naming the missing one.
 agent-device's `testmu` runtime reads the credentials from the environment
 of the daemon that drives the sessions. The provider starts that daemon from
 the runner process, and agent-device starts a daemon with the process's own
-environment, so the provider copies both values from the run's environment
-into it first.
+environment, so the provider copies `LT_USERNAME` and `LT_ACCESS_KEY` from
+the run's environment into the runner's `process.env` first, where the
+daemon it starts can read them.
 
 ## Install the app
 

@@ -40,7 +40,8 @@ export default {
 ```
 
 It authenticates with `LT_USERNAME` and `LT_ACCESS_KEY` from the run's
-environment. Each worker slot leases one device from an agent-device daemon
+environment, and copies both into the runner's `process.env`, where the
+agent-device daemon it starts reads them. Each worker slot leases one device from an agent-device daemon
 the provider starts for the run. Allocating the lease starts the TestMu AI
 session, which installs `app`, so every slot is billed from the moment it is
 leased, even when no test runs on it. The lease is released when the run
@@ -48,9 +49,11 @@ ends, which ends the session.
 
 - `device` and `osVersion` must match TestMu AI's catalog exactly: `18.0`
   for a virtual iOS device, `18` for a real one, `14` on Android.
-- `app` is an `lt://` app id, an `https` URL, or a local path resolved
-  against the project root. Keep the target's `app.bundleId` and leave
-  `app.appPath` out.
+- `app` is required: an `lt://` app id, an `https` URL, or a local path
+  resolved against the project root, which TestMu AI installs when the
+  session starts. Keep the target's `app.bundleId`. The provider refuses
+  `app.appPath` on purpose, since it hands TestMu AI the build itself;
+  `device.installApp()` with a path still works during a test.
 - `deviceType: 'real'` picks a real device (default `'virtual'`).
 - `project` (default `e2e`), `build` (default the run id), and `sessionName`
   (default `e2e-<run id>-<target>-<slot>`) label the sessions on the
