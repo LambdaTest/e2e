@@ -1,5 +1,21 @@
 # @e2e-dev/github
 
+## 0.3.3
+
+### Patch Changes
+
+- [#713](https://github.com/tester-army/e2e/pull/713) [`7ab80bc`](https://github.com/tester-army/e2e/commit/7ab80bc61001dd102006ea020419b74b72ddf0c7) Thanks [@okwasniewski](https://github.com/okwasniewski)! - Breaking: an interrupted test is no longer counted as failed. `report.json` gains `run.summary.interrupted`, and `run.summary.failed` counts only failed and timed-out tests. `run.summary.skipped` now counts only selected tests, so `passed + failed + interrupted + flaky + skipped` equals `selected`; the tests a filter left out are `discovered - selected`. The `list` reporter prints `3 interrupted` in its own column, `summary.md` shows them with ⏹️ and gives them no failure block or page, and `junit.xml` writes each one as a `<skipped>` whose message starts `interrupted:`. A test that failed and whose retry an interrupt cut short stays failed, and its failure is the one reported. A `--repeat-each` run the interrupt stopped is listed as interrupted, not as a flake. The telemetry event gains `tests_interrupted`. In `@e2e-dev/github`, a test that was interrupted and then passed on a `--last-failed` rerun shows as passed, not flaky.
+
+- [#724](https://github.com/tester-army/e2e/pull/724) [`3a9667c`](https://github.com/tester-army/e2e/commit/3a9667c0467f464bf542c50380d3468b0c222b17) Thanks [@okwasniewski](https://github.com/okwasniewski)! - `--last-failed` no longer goes green on tests it never ran. It reruns tests `--max-failures` skipped, and a test or failed `beforeAll`/`afterAll` another filter leaves out stays owed in the report's new `run.carried` until a rerun runs it. A rerun also keeps the artifacts of the run it reruns and writes its own under `artifacts/rerun-<n>/` in the output directory (`.e2e` by default), so the folded pull request comment keeps its evidence and stays red while anything is owed.
+
+## 0.3.2
+
+### Patch Changes
+
+- [#720](https://github.com/tester-army/e2e/pull/720) [`62bfe0a`](https://github.com/tester-army/e2e/commit/62bfe0a896a50f501f071d31c8935e0e0bdabfcf) Thanks [@okwasniewski](https://github.com/okwasniewski)! - Two matrix jobs whose `key`, workflow, or job differ only after the first 200 encoded characters now keep their own pull request comments instead of overwriting one. A long field's marker ends in a digest of the whole value; markers of shorter fields are unchanged, so existing comments are still found. A job with a field that long posts one new comment after upgrading and leaves its old one behind. The reporter only takes a comment whose first line is its marker, so a reply quoting the marker is never edited.
+
+- [#763](https://github.com/tester-army/e2e/pull/763) [`b573756`](https://github.com/tester-army/e2e/commit/b573756818d7d04088142d29e0e730cfbaf21b45) Thanks [@okwasniewski](https://github.com/okwasniewski)! - Installing `e2e` pulls in 29 packages instead of 117 and takes about 31MB instead of 36MB. `e2e mcp` now runs on the split MCP SDK (`@modelcontextprotocol/server` 2.2.0) in place of `@modelcontextprotocol/sdk`, which brought in express, hono, and the rest of an HTTP server stack that stdio never used. The server keeps the same protocol version, so existing clients connect as before. Packages are built and published without sourcemaps, which pointed at a `src/` that was never shipped. Stack traces show `dist/` positions.
+
 ## 0.3.1
 
 ### Patch Changes

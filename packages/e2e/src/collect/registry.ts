@@ -110,13 +110,31 @@ class Collector {
   /** Real path of the module being collected, the file a test's source prefers. */
   private readonly moduleFile: string | undefined;
 
-  constructor(moduleFile: string | undefined) {
+  constructor(
+    moduleFile: string | undefined,
+    /** Rewrites a registered secret value in a title to its marker. */
+    private readonly redactTitle: (title: string) => string,
+  ) {
     this.moduleFile = moduleFile === undefined ? undefined : realPath(moduleFile);
   }
 
   close(): ModuleRegistration {
     this.closed = true;
     return { tests: this.tests, hooks: this.hooks };
+  }
+
+  /**
+   * The title as it registers: validated as written, redacted, then
+   * normalized to NFC, and validated again, since a marker can be longer
+   * than the value it replaces.
+   */
+  private title(raw: string): string {
+    const rawError = validateTitle(raw);
+    if (rawError !== null) throw new CollectionError(rawError);
+    const title = this.redactTitle(raw).normalize('NFC');
+    const error = title === raw.normalize('NFC') ? null : validateTitle(title);
+    if (error !== null) throw new CollectionError(`${error} once secret values are redacted`);
+    return title;
   }
 
   private assertOpen(api: string): void {
@@ -137,9 +155,7 @@ class Collector {
     fixtures: readonly FixtureDefinition[],
   ): TestCase {
     this.assertOpen(kind === 'setup' ? 'test.setup()' : 'test()');
-    const titleError = validateTitle(title);
-    if (titleError !== null) throw new CollectionError(titleError);
-    const normalizedTitle = title.normalize('NFC');
+    const normalizedTitle = this.title(title);
     if (typeof fn !== 'function') throw new CollectionError('test body must be a function');
     if (kind === 'setup') {
       if (this.currentGroup !== undefined) {
@@ -187,12 +203,11 @@ class Collector {
 
   registerDescribe(title: string, options: DescribeOptions, body: () => unknown): void {
     this.assertOpen('describe()');
-    const titleError = validateTitle(title);
-    if (titleError !== null) throw new CollectionError(titleError);
+    const normalizedTitle = this.title(title);
     if (typeof body !== 'function') throw new CollectionError('describe body must be a function');
     validateDescribeOptions(options, this.currentGroup);
     const group: GroupNode = {
-      title: title.normalize('NFC'),
+      title: normalizedTitle,
       options,
       parent: this.currentGroup,
       serial: options.serial === true,
@@ -203,7 +218,7 @@ class Collector {
       const result = body();
       if (isPromiseLike(result)) {
         throw new CollectionError(
-          `describe body for ${JSON.stringify(title)} must finish synchronously`,
+          `describe body for ${JSON.stringify(group.title)} must finish synchronously`,
         );
       }
     } finally {
@@ -432,24 +447,30 @@ function validateDescribeOptions(options: DescribeOptions, parent: GroupNode | u
 }
 
 /**
- * The active collector lives on globalThis because test modules load in an
- * isolated module realm (tsx) and must reach the runner's collector instance.
+ * The active collector lives on globalThis because a test module may import a
+ * copy of e2e other than the runner's and must still reach the runner's
+ * collector instance.
  */
 const collectorSlot = realmSlot<Collector>('e2e.activeCollector.v1');
 
 /**
  * Runs `load` with a fresh collector active and returns everything it
  * registered. `moduleFile` is the absolute path of the module `load` imports;
- * a test's source prefers a frame in that file.
+ * a test's source prefers a frame in that file. `redactTitle` is applied to
+ * every test and describe title as it registers, so a secret a title spells
+ * out never reaches a test id, a report, or a path derived from either; the
+ * runner passes the static secrets of the config (`staticSecretLedger`), the
+ * same in every process, so ids agree across them.
  */
 export async function collectModule(
   load: () => Promise<unknown>,
   moduleFile?: string,
+  redactTitle: (title: string) => string = (title) => title,
 ): Promise<ModuleRegistration> {
   if (collectorSlot.get(globalThis) !== undefined) {
     throw new CollectionError('collection is already in progress');
   }
-  const collector = new Collector(moduleFile);
+  const collector = new Collector(moduleFile, redactTitle);
   collectorSlot.set(globalThis, collector);
   try {
     await load();
@@ -472,12 +493,10 @@ function requireCollector(api: string): Collector {
 const PACKAGE_ROOT = path.dirname(path.dirname(path.dirname(fileURLToPath(import.meta.url))));
 /**
  * The runner's own source roots, whose frames are never a test's location.
- * `dist/` is where the published module runs; `src/` is where tsx's source maps
- * relocate those very frames (and where the module runs in this repository).
+ * `dist/` is where the published module runs; `src/` is where it runs in this
+ * repository.
  */
 const RUNNER_ROOTS = ['src', 'dist'].map((dir) => `${path.join(PACKAGE_ROOT, dir)}${path.sep}`);
-/** `at name (file:line:column)` or `at file:line:column`, with or without a `file://` scheme. */
-const STACK_FRAME = /\(?(?:file:\/\/)?([^()\s]+?):(\d+):(\d+)\)?$/;
 const NODE_MODULES_SEGMENT = /[\\/]node_modules[\\/]/;
 
 /** The path with symlinks resolved, or the path itself when it cannot be resolved. */
@@ -487,6 +506,27 @@ function realPath(file: string): string {
   } catch {
     return file;
   }
+}
+
+/** `at name (location:line:column)` or `at location:line:column`, either one after `async` for an awaiting caller. */
+const STACK_FRAME = /^at (?:async )?(?:[^(]*? \()?(.+?):(\d+):(\d+)\)?$/;
+
+/**
+ * Every frame of the current stack as a source location, the async frames
+ * of awaiting callers included (a test file that awaits a helper declaring
+ * tests is one), at the source positions Node.js's source maps give them.
+ * Read from the stack text: `util.getCallSites` leaves the async frames out,
+ * and with source maps on Node.js does not hand `Error.prepareStackTrace`
+ * the call sites at all.
+ */
+function stackLocations(): SourceLocation[] {
+  return (new Error().stack ?? '').split('\n').slice(1).flatMap((line) => {
+    const match = STACK_FRAME.exec(line.trim());
+    if (match === null) return [];
+    // An ES module names itself by URL, the loader's cache-busting query included; a mapped frame or CommonJS by path.
+    const file = match[1]!.startsWith('file:') ? fileURLToPath(match[1]!) : match[1]!;
+    return [{ file, line: Number(match[2]), column: Number(match[3]) }];
+  });
 }
 
 /**
@@ -500,16 +540,10 @@ function realPath(file: string): string {
  * package's frames are never a test's location.
  */
 function captureSource(moduleFile: string | undefined): SourceLocation | undefined {
-  const stack = new Error().stack;
-  if (stack === undefined) return undefined;
   let outsideModule: SourceLocation | undefined;
-  for (const line of stack.split('\n').slice(1)) {
-    const match = STACK_FRAME.exec(line.trim());
-    if (match === null) continue;
-    // The loader imports every module with a cache-busting query, which is not part of the file.
-    const file = decodeURIComponent(match[1]!).replace(/[?#].*$/, '');
+  for (const location of stackLocations()) {
+    const { file } = location;
     if (RUNNER_ROOTS.some((root) => file.startsWith(root)) || file.startsWith('node:')) continue;
-    const location = { file, line: Number(match[2]), column: Number(match[3]) };
     if (moduleFile !== undefined && (file === moduleFile || realPath(file) === moduleFile)) {
       return location;
     }

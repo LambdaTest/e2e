@@ -12,12 +12,12 @@
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { formatNode, prepareObservation, type AgentObservation } from '../agent/observation.ts';
+import { formatNode, prepareObservation, type AgentObservation, type RedactedNode } from '../agent/observation.ts';
 import type { ResolvedConfig } from '../config/resolve.ts';
 import type { OperationContext, TargetSession } from '../engine/surface.ts';
-import type { SemanticNode } from '../engine/contract.ts';
 import { truncateUtf8, type E2EError } from '../internal/errors.ts';
 import { isTypoOf } from '../internal/suggest.ts';
+import { withAbort } from '../internal/time.ts';
 import type { ArtifactSink } from './fixtures.ts';
 import type { FailureEvidence } from './records.ts';
 import type { SessionSecrecy } from './secrecy.ts';
@@ -59,9 +59,13 @@ export async function captureFailureEvidence(options: FailureEvidenceOptions): P
   const operation = options.operation(signal, EVIDENCE_TIMEOUT_MS);
   const { redact, redactCut } = options.secrecy.ledger;
 
+  // The engine is handed the budget, and the wait is abandoned at its end
+  // either way: an engine stuck on a hung app may never honor it.
+  const bounded = <T>(work: () => Promise<T>): Promise<T> => withAbort(work, signal, () => new Error('failure evidence ran out of budget'));
+
   let observation: AgentObservation | undefined;
   try {
-    const raw = await options.session.observe(operation);
+    const raw = await bounded(() => options.session.observe(operation));
     observation = prepareObservation(raw, {
       redact,
       redactCut,
@@ -94,7 +98,7 @@ export async function captureFailureEvidence(options: FailureEvidenceOptions): P
   // prove a tainted viewport redacted.
   if (!options.secrecy.exposure.withholdsPixels && !signal.aborted) {
     try {
-      const relative = await options.session.artifacts.screenshot('failure', operation);
+      const relative = await bounded(() => options.session.artifacts.screenshot('failure', operation));
       evidence.screenshot = options.artifacts.register('screenshot', relative);
     } catch {
       // A screenshot the engine could not take is not evidence the report claims.
@@ -135,11 +139,13 @@ function locatorCandidates(
 ): string[] {
   if (observation.kind === 'pixels') return [];
   if (error.code !== 'LOCATOR_NOT_FOUND' && error.code !== 'LOCATOR_AMBIGUOUS') return [];
-  const { role, testId, name } = error.details ?? {};
+  const details = error.details ?? {};
+  // The nodes are redacted; the query is compared in the same form, so a secret test id still finds its node.
+  const [role, testId, name] = [details.role, details.testId, details.name].map((value) => (value === undefined ? undefined : redact(value)));
   const words = tokens(name ?? '');
   if (role === undefined && testId === undefined && words.length === 0) return [];
 
-  const scored: { score: number; node: SemanticNode }[] = [];
+  const scored: { score: number; node: RedactedNode }[] = [];
   for (const node of observation.nodes.values()) {
     const roleMatched = role !== undefined && node.role?.toLowerCase() === role.toLowerCase();
     const testIdMatched = testId !== undefined && node.testId !== undefined && (node.testId === testId || node.testId.includes(testId) || testId.includes(node.testId));
@@ -165,7 +171,7 @@ function locatorCandidates(
   return scored
     .toSorted((a, b) => b.score - a.score)
     .slice(0, MAX_CANDIDATES)
-    .map(({ node }) => truncateUtf8(formatNode(node, 0, redact, appOrigin), MAX_CANDIDATE_BYTES));
+    .map(({ node }) => truncateUtf8(formatNode(node, 0, appOrigin), MAX_CANDIDATE_BYTES));
 }
 
 /**

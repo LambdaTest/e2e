@@ -69,10 +69,44 @@ It throws when the file is missing; guard it with `existsSync` from
 `node:fs` when only some machines have one.
 
 Config and test files run as ESM whatever the nearest `package.json` `type`
-says, and so does the TypeScript they import: a helper by path, or a
-workspace package that exports its `.ts` source by name. An installed package
-imported by name keeps its own format. A config or test written with `require`
-or `module.exports` fails to load.
+says, and so does every `.ts`, `.mts`, `.tsx`, and `.jsx` file they reach: a
+helper by path, a package that exports its `.ts` source by name, or a `.ts`
+file a CommonJS file requires. A `.cts` file is CommonJS, written with
+`require`, `import x = require()`, and `export =`; its `import` statements are
+not turned into `require` calls. A `.ts` file written with `require` or
+`module.exports` fails to load: name it `.cts`. JavaScript keeps the format
+its package declares.
+
+e2e compiles TypeScript and JSX itself, and an import written in such a file
+resolves the way TypeScript resolves it: `./helper.js` and `./helper` load
+`helper.ts`, `./lib` loads the file `lib/package.json` names as `main`, else
+`lib/index.ts`, a bare import that `tsconfig.json` maps through `paths` or
+`baseUrl` loads the mapped file, and a `#` import or package export that names
+a missing `./x.js` or `./x` loads `x.ts` when imported (a `require()` of it
+fails as Node.js reports it). An import written in a JavaScript file resolves
+as Node.js resolves it.
+
+The `tsconfig.json` is the nearest one above the file, or, when that one has
+`references` and does not include the file itself (as Vite writes it), the
+directly referenced one that does. e2e reads its `paths`, `baseUrl`, `jsx`, `jsxFactory`,
+`jsxFragmentFactory`, `jsxImportSource`, `experimentalDecorators`,
+`emitDecoratorMetadata`, `useDefineForClassFields` (and `target`, which sets
+its default), and `verbatimModuleSyntax`, once per process and again for each
+session `e2e mcp` opens. A `tsconfig.json` e2e cannot read, such as one that
+`extends` a package that is not installed, is skipped with a warning.
+TypeScript inside an installed package compiles without the project's
+`tsconfig.json`.
+
+e2e refuses, naming the file and line, two things it cannot compile:
+auto-accessors (`accessor x = 1`) and decorators without
+`experimentalDecorators`. Each file compiles on its own, without type
+information, so a type imported without `import type` fails to load when the
+import stays in the output (a decorated member's type under
+`emitDecoratorMetadata`, a re-exported type); the error names the import to
+change. A JSON file imported without `with { type: 'json' }` loads with its
+parsed contents as the default export. Stack traces and failure locations
+point at the TypeScript source, through another loader's source map too
+(`NODE_OPTIONS=--import tsx`).
 
 ## Top level
 
@@ -96,6 +130,8 @@ export interface E2EConfig {
   cleanupTimeout?: number;
   /** Retries per test, 0 through 10; default 1 in CI, else 0. */
   retries?: number;
+  /** Fail the run when a test skips itself after a soft failure or an earlier failed attempt; default false. */
+  failOnSkippedFailure?: boolean;
   /** Parallel workers, 1 through 1024; default 1 in CI, else half the cores. An engine may cap it lower. */
   workers?: number;
   /** `{ store }` hands every artifact to a host store as it is produced. */
@@ -157,6 +193,17 @@ Every numeric value must be a safe integer. `projectId` falls back to
 `unportable-<sha256 of the project root, 32 hex>` when there is no
 `package.json`. `workers` never exceeds what a target's engine declares. A
 targeted agent action is bounded by the smaller of `actionTimeout` and 15 s.
+
+## failOnSkippedFailure
+
+Set `failOnSkippedFailure: true` to fail the run with exit code 1 when a test
+skips after a soft assertion failure or skips a retry after an earlier failed
+attempt. The default is `false`.
+
+The test keeps its `skipped` status and reason. Its failures remain in the
+report, and the CLI shows them under `Skipped After Failure` with either
+setting. Clean skips, successful retries, and engine cleanup diagnostics do
+not trigger this policy. A skip still stops the body and does not retry.
 
 ## targets
 
@@ -267,8 +314,9 @@ it (no `app.command`) is `INVALID_CONFIG`. An `app.command` with neither
 
 ### The app's site
 
-A test or the agent may open any http(s) URL; `file:`, `data:`, and
-`javascript:` are `POLICY_DENIED`. The site of `url`, its registrable domain
+A test or the agent may open any http(s) URL, and `about:blank`; every
+other scheme (`file:`, `data:`, `javascript:`, `view-source:`, `blob:`) is
+`POLICY_DENIED`. The site of `url`, its registrable domain
 (`app.example.com` and `auth.example.com` are one site), scopes two things:
 the browser engine's [`headers`](/reference/web#options) reach the
 site and no other host, and child frames off the site stay out of
@@ -369,7 +417,7 @@ run.
 | `report.json` | The canonical report; `--last-failed` reads the one here |
 | `junit.xml`, `summary.md`, `failures/` | The `junit` and `markdown` reporters' files |
 | `ai-trace.json` | `--ai-trace` |
-| `artifacts/` | Screenshots, traces, videos, downloads, and logs, one directory per attempt. Cleared once a run's tests start, so it holds the latest run's evidence and nothing its report no longer names |
+| `artifacts/` | Screenshots, traces, videos, downloads, and logs, one directory per attempt. Cleared once a run's tests start, so it holds the latest run's evidence and nothing its report no longer names. A `--last-failed` rerun keeps the files the report it reruns names and writes its own attempts under `artifacts/rerun-<n>/` |
 | `sessions/` | The run's encrypted `test.setup` sessions, deleted when it ends |
 | `videos/<session>/` | [`e2e mcp`](/reference/mcp#recording) session recordings |
 
@@ -754,8 +802,9 @@ export interface ModelInstance {
 }
 ```
 
-Construct the model in your config with an AI SDK provider. For subscription
-sign-in, use the [`e2e/oauth/*` models](/subscriptions).
+Construct the model in your config with an AI SDK provider. You can use all
+providers that support tool calls, see [AI SDK providers](/models#ai-sdk-providers).
+For subscription sign-in, use the [`e2e/oauth/*` models](/subscriptions).
 
 | Gateway | Constructor | Package | Reads |
 | --- | --- | --- | --- |
@@ -798,7 +847,9 @@ Credentials and secrets are separate namespaces: `secrets.get(name)` returns a
 reports know that handle as `<name>.password` (`<secret:admin.password>`), so
 `credentials.admin` and `secrets.admin` can both exist; a `secrets` entry
 named exactly `admin.password` beside an `admin` credential is
-`INVALID_CONFIG`.
+`INVALID_CONFIG`. So are two credentials whose names map to one
+`E2E_USER_<NAME>_*` override, like `svc-a` and `svc_a` (see
+[Environment variables](/reference/environment)).
 
 ```ts
 /** Named test identity. The password remains an opaque Secret. */
@@ -824,7 +875,8 @@ export type SecretConfig = string | SecretProvider;
 
 An entry is a static value, or a provider called on every authorized fill (a
 vault lookup, a freshly computed TOTP). It is recorded in the config digest by
-name only, and an `E2E_SECRET_<NAME>` override wins over both. Every entry
+name only, and an `E2E_SECRET_<NAME>` override wins over both. Two entries whose
+names map to one variable, like `api-key` and `api_key`, are `INVALID_CONFIG`. Every entry
 must resolve to a string of at least 6 characters (code points) or a
 function; anything else is `INVALID_CONFIG`. The minimum exists for redaction: every occurrence
 of a value becomes `<secret:name>`, and a shorter value would take ordinary

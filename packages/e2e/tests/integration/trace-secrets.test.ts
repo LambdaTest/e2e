@@ -3,10 +3,11 @@
  * the real Playwright engine: a credential filled by `screen.fill()` and one
  * filled by an executor's `typeSecret` each produce a trace whose every text
  * entry is redacted, labelled `complete`, and handed to the store already
- * clean; an attempt that filled no secret keeps its trace as recorded,
- * labelled `not-required`. A secret filled into a visible ordinary field
- * denies screenshots and leaves no screencast frame in the trace, while the
- * untainted trace keeps its frames. The executor's fill is recorded in the
+ * clean; an attempt that filled no secret has its trace and text download
+ * scanned too, labelled `complete`, its text and frames kept as recorded. A
+ * secret filled into a visible ordinary field denies screenshots and leaves
+ * no screencast frame in the trace, while the untainted trace keeps its
+ * frames. The executor's fill is recorded in the
  * trace cache by the secret's name alone. Nothing under the project's `.e2e`
  * directory holds the plaintext afterwards.
  */
@@ -15,6 +16,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { inflateEntry, readZip } from '../../src/internal/zip.ts';
+import type { ExecutorNode } from '../../src/agent/executor.ts';
 import type { ArtifactStore, StoredArtifact } from '../../src/types.ts';
 import type { RunOutcome } from '../../src/run/runner.ts';
 import { startFixtureApp, type FixtureApp } from '../helpers/fixture-app.ts';
@@ -119,16 +121,20 @@ describe('trace secrecy', () => {
               name: 'secret-filler',
               async runStep(context) {
                 const observation = await context.observe({ tree: true });
-                const secure = (function find(node): { id: string } | undefined {
-                  if (node.states?.secure === true) return node;
-                  for (const child of node.children ?? []) {
-                    const found = find(child);
-                    if (found !== undefined) return found;
-                  }
-                  return undefined;
-                })(observation.tree!);
+                const find = (match: (node: ExecutorNode) => boolean) =>
+                  (function walk(node: ExecutorNode): ExecutorNode | undefined {
+                    if (match(node)) return node;
+                    for (const child of node.children ?? []) {
+                      const found = walk(child);
+                      if (found !== undefined) return found;
+                    }
+                    return undefined;
+                  })(observation.tree!);
                 // Declared secrets are keyed by the credential's name, not the param's.
-                await context.actions.typeSecret({ id: secure!.id }, 'member.password');
+                await context.actions.typeSecret({ id: find((node) => node.states?.secure === true)!.id }, 'member.password');
+                // A secure field never shows its value, so the fill alone leaves nothing a replay
+                // could check; the counter is the step's visible effect, which makes it recordable.
+                await context.actions.tap({ id: find((node) => node.role === 'button' && node.name === 'Increment')!.id });
                 return { status: 'passed', summary: 'filled' };
               },
             },
@@ -173,10 +179,10 @@ describe('trace secrecy', () => {
     },
   );
 
-  it('fills nothing: the trace is kept as recorded and labelled not-required', () => {
+  it('fills nothing: the trace is scanned, kept as recorded, and labelled complete', () => {
     const attempt = resultByTitle(outcome, 'fills nothing').attempts[0]!;
     const trace = attempt.artifacts.find((artifact) => artifact.kind === 'trace')!;
-    expect(trace).toMatchObject({ redaction: 'not-required' });
+    expect(trace).toMatchObject({ redaction: 'complete' });
     expect(trace.path).toBeDefined();
     const onDisk = readFileSync(path.join(project.dir, '.e2e', 'artifacts', trace.path!));
     const entries = textEntries(onDisk);
@@ -210,12 +216,12 @@ describe('trace secrecy', () => {
     expect(Buffer.from(put.bytes).toString('utf8')).toBe(onDisk);
   });
 
-  it('downloads without a fill: the file is kept as served and labelled incomplete', () => {
+  it('downloads without a fill: the text file is scanned, kept as served, and labelled complete', () => {
     const attempt = resultByTitle(outcome, 'downloads without a fill').attempts[0]!;
     const download = attempt.artifacts.find((artifact) => artifact.kind === 'download')!;
-    expect(download).toMatchObject({ redaction: 'incomplete', mediaType: 'text/csv' });
+    expect(download).toMatchObject({ redaction: 'complete', mediaType: 'text/csv' });
     expect(readFileSync(path.join(project.dir, '.e2e', 'artifacts', download.path!), 'utf8')).toBe('id,total\n1,42\n');
-    expect(store.puts.find((stored) => stored.path === download.path)).toMatchObject({ redaction: 'incomplete' });
+    expect(store.puts.find((stored) => stored.path === download.path)).toMatchObject({ redaction: 'complete' });
   });
 
   it('records the executor fill in the cache by the secret name alone, with no value', () => {
@@ -228,6 +234,7 @@ describe('trace secrecy', () => {
         target: expect.objectContaining({ role: 'textbox', name: 'Password' }),
         secret: 'member.password',
       },
+      expect.objectContaining({ name: 'tap', target: expect.objectContaining({ role: 'button', name: 'Increment' }) }),
     ]);
   });
 

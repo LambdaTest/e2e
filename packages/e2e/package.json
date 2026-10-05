@@ -1,6 +1,6 @@
 {
   "name": "e2e",
-  "version": "0.15.2",
+  "version": "0.17.0",
   "description": "SDK, runner, and CLI for agentic end-to-end testing",
   "keywords": [
     "e2e",
@@ -62,6 +62,10 @@
     "./oauth/grok": {
       "types": "./dist/oauth/grok.d.ts",
       "default": "./dist/oauth/grok.js"
+    },
+    "./oauth/opencode-console": {
+      "types": "./dist/oauth/opencode-console.d.ts",
+      "default": "./dist/oauth/opencode-console.js"
     }
   },
   "bin": {
@@ -85,21 +89,33 @@
   "dependencies": {
     "@ai-sdk/provider": "4.0.18",
     "@clack/prompts": "1.8.1",
+    "@jridgewell/remapping": "2.3.5",
     "@modelcontextprotocol/server": "2.2.0",
+    "@oxc-project/runtime": "0.152.0",
     "@vitest/expect": "5.0.2",
     "commander": "15.0.0",
+    "get-tsconfig": "4.14.3",
+    "oxc-parser": "0.152.0",
+    "oxc-transform": "0.152.0",
     "picocolors": "1.1.1",
     "pngjs": "7.0.0",
-    "tsx": "4.23.14",
     "zod": "4.6.1"
   },
   "peerDependencies": {
+    "@ai-sdk/anthropic": "^4.0.0",
+    "@ai-sdk/google": "^4.0.0",
     "@ai-sdk/openai": "^4.0.0",
     "@ai-sdk/openai-compatible": "^3.0.0",
     "@ai-sdk/xai": "^5.0.0",
     "ai": "^7.0.0"
   },
   "peerDependenciesMeta": {
+    "@ai-sdk/anthropic": {
+      "optional": true
+    },
+    "@ai-sdk/google": {
+      "optional": true
+    },
     "@ai-sdk/openai": {
       "optional": true
     },
@@ -114,6 +130,8 @@
     }
   },
   "devDependencies": {
+    "@ai-sdk/anthropic": "4.0.58",
+    "@ai-sdk/google": "4.0.77",
     "@ai-sdk/openai": "4.0.71",
     "@ai-sdk/openai-compatible": "3.0.53",
     "@ai-sdk/xai": "5.0.4",
@@ -125,11 +143,10 @@
     "ai": "7.0.107",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1",
-    "playwright": "1.63.0",
     "typescript": "7.0.2",
     "vitest": "5.0.1"
   },
   "engines": {
-    "node": ">=22.12.0"
+    "node": "^22.22.3 || >=24.8.0"
   }
 }

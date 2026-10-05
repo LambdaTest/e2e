@@ -14,6 +14,7 @@ import { createFixtures } from '../../src/run/fixtures.ts';
 import { StepRecorder } from '../../src/run/steps.ts';
 import { WorkerModels } from '../../src/run/worker-models.ts';
 import type { E2EConfig } from '../../src/types.ts';
+import { runAgentStepsOnFakeTime } from '../helpers/agent-fake-time.ts';
 import { installFakeLoopModel } from '../helpers/fake-loop-model.ts';
 import { judgment } from '../helpers/fake-model.ts';
 import { createScriptedInstance, scriptedResult } from '../helpers/scripted-model.ts';
@@ -25,6 +26,8 @@ vi.mock(import('../../src/agent/model/stall.ts'), async (importOriginal) => {
   return { withStallGuard: (sdk, model, onStall, stallMs = 50) => stall.withStallGuard(sdk, model, onStall, stallMs) };
 });
 
+runAgentStepsOnFakeTime();
+
 /** Settles only when `signal` aborts, as a request the provider never answers does. */
 function never(signal: AbortSignal | undefined): Promise<never> {
   return new Promise((_, reject) => {
@@ -34,10 +37,10 @@ function never(signal: AbortSignal | undefined): Promise<never> {
 
 describe('withStallGuard', () => {
   it('sends a request that got no response again, as a retryable provider error', async () => {
-    let calls = 0;
+    const sentAt: number[] = [];
     const model = createScriptedInstance('fake', 'stall', async (options: { abortSignal?: AbortSignal }) => {
-      calls += 1;
-      if (calls === 1) return never(options.abortSignal);
+      sentAt.push(Date.now());
+      if (sentAt.length === 1) return never(options.abortSignal);
       return scriptedResult([{ type: 'text', text: 'answered' }], 'stop');
     });
     const stalls: number[] = [];
@@ -48,33 +51,31 @@ describe('withStallGuard', () => {
     });
 
     expect(result.text).toBe('answered');
-    expect(calls).toBe(2);
+    expect(sentAt).toHaveLength(2);
+    expect(sentAt[1]! - sentAt[0]!).toBeGreaterThanOrEqual(50);
+    expect(sentAt[1]! - sentAt[0]!).toBeLessThan(5_000);
     expect(stalls).toEqual([50]);
   });
 
   it('abandons a request whose provider ignores the abort, and sends it again', async () => {
-    let calls = 0;
+    const sentAt: number[] = [];
     const model = createScriptedInstance('fake', 'deaf', async () => {
-      calls += 1;
-      if (calls === 1) return new Promise<never>(() => undefined);
+      sentAt.push(Date.now());
+      if (sentAt.length === 1) return new Promise<never>(() => undefined);
       return scriptedResult([{ type: 'text', text: 'answered' }], 'stop');
     });
     const result = await generateText({ model: withStallGuard(ai, asSdkLanguageModel(model), () => undefined, 50), prompt: 'hello', maxRetries: 1 });
 
     expect(result.text).toBe('answered');
-    expect(calls).toBe(2);
+    expect(sentAt).toHaveLength(2);
+    expect(sentAt[1]! - sentAt[0]!).toBeLessThan(5_000);
   });
 
   it('clears its timer when the provider throws before returning a promise', async () => {
-    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-    try {
-      const inner = asSdkLanguageModel(createScriptedInstance('fake', 'throws', async () => scriptedResult([], 'stop')));
-      const throwing = { ...inner, doGenerate: () => { throw new Error('bad request shape'); } } as typeof inner;
-      await expect(generateText({ model: withStallGuard(ai, throwing, () => undefined, 50), prompt: 'hello', maxRetries: 0 })).rejects.toThrow('bad request shape');
-      expect(vi.getTimerCount()).toBe(0);
-    } finally {
-      vi.useRealTimers();
-    }
+    const inner = asSdkLanguageModel(createScriptedInstance('fake', 'throws', async () => scriptedResult([], 'stop')));
+    const throwing = { ...inner, doGenerate: () => { throw new Error('bad request shape'); } } as typeof inner;
+    await expect(generateText({ model: withStallGuard(ai, throwing, () => undefined, 50), prompt: 'hello', maxRetries: 0 })).rejects.toThrow('bad request shape');
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("passes the caller's cancellation through as it was, not as a stall", async () => {
@@ -144,17 +145,18 @@ describe('tool loop stall', () => {
 
 describe('judgment stall', () => {
   it('sends a stalled judgment again and keeps its verdict', async () => {
-    let requests = 0;
+    const sentAt: number[] = [];
     const model = createScriptedInstance('fake', 'stalls-once', async (options: { abortSignal?: AbortSignal }) => {
-      requests += 1;
-      if (requests === 1) return never(options.abortSignal);
+      sentAt.push(Date.now());
+      if (sentAt.length === 1) return never(options.abortSignal);
       return scriptedResult([{ type: 'text', text: JSON.stringify(judgment(true, 'the screen is empty')) }], 'stop');
     });
     const { fixtures, steps } = runtime({ agents: { default: { model } } });
 
     await fixtures.agent.assert('the screen is empty');
 
-    expect(requests).toBe(2);
+    expect(sentAt).toHaveLength(2);
+    expect(sentAt[1]! - sentAt[0]!).toBeLessThan(5_000);
     expect(steps.all()[0]).toMatchObject({ api: 'agent.assert', status: 'passed' });
   });
 });

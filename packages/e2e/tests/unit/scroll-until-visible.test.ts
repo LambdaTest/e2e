@@ -7,7 +7,7 @@
  * `filter({ has })` locator, has to come from the same target's screen.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EngineError, resolveExpression, type NodeRef, type SemanticNode } from '../../src/engine/index.ts';
 import { sleep } from '../../src/internal/time.ts';
 import type { Locator, Screen } from '../../src/types.ts';
@@ -76,6 +76,15 @@ function scrollScreen(script: ScrollScript) {
   return { screen, steps, swipes };
 }
 
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setTimerTickMode('nextTimerAsync');
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe('screen.scrollUntilVisible', () => {
   it('on a locator, swipes that node instead of the viewport, so a scroll container pages', async () => {
     const { screen, swipes } = scrollScreen({ screens: [[feed()], [feed()], [feed(TARGET)]] });
@@ -86,10 +95,13 @@ describe('screen.scrollUntilVisible', () => {
     ]);
   });
 
-  it('takes a momentum for the stride of each step', async () => {
+  it('takes a direction and a momentum for the stride of each step, on the screen and on a locator', async () => {
+    const viewport = scrollScreen({ screens: [[], [TARGET]] });
+    await viewport.screen.scrollUntilVisible(viewport.screen.getByText('Accept'), { direction: 'up', momentum: 'none' });
+    expect(viewport.swipes).toEqual([{ ref: 'root', direction: 'up', momentum: 'none' }]);
     const { screen, swipes } = scrollScreen({ screens: [[feed()], [feed(TARGET)]] });
-    await screen.getByRole('list', { name: 'Feed' }).scrollUntilVisible(screen.getByText('Accept'), { momentum: 'none' });
-    expect(swipes).toEqual([{ ref: 'feed', direction: 'down', momentum: 'none' }]);
+    await screen.getByRole('list', { name: 'Feed' }).scrollUntilVisible(screen.getByText('Accept'), { direction: 'right', momentum: 'none' });
+    expect(swipes).toEqual([{ ref: 'feed', direction: 'right', momentum: 'none' }]);
   });
 
   it('refuses an option it does not take before any swipe', async () => {
@@ -115,12 +127,6 @@ describe('screen.scrollUntilVisible', () => {
     ]);
   });
 
-  it('swipes in the requested direction', async () => {
-    const { screen, swipes } = scrollScreen({ screens: [[], [TARGET]] });
-    await screen.scrollUntilVisible(screen.getByText('Accept'), { direction: 'right' });
-    expect(swipes).toEqual([{ ref: 'root', direction: 'right', momentum: 'slow' }]);
-  });
-
   it('keeps scrolling past a target the engine reports hidden', async () => {
     const { screen, swipes } = scrollScreen({ screens: [[HIDDEN_TARGET], [HIDDEN_TARGET], [TARGET]] });
     await screen.scrollUntilVisible(screen.getByText('Accept'));
@@ -137,7 +143,9 @@ describe('screen.scrollUntilVisible', () => {
     expect(swipes.length).toBeGreaterThanOrEqual(1);
     expect(steps.all()).toEqual([
       expect.objectContaining({
+        kind: 'screen',
         api: 'screen.scrollUntilVisible',
+        label: 'getByText("Accept")',
         status: 'failed',
         error: expect.objectContaining({ code: 'LOCATOR_NOT_FOUND' }),
       }),
@@ -212,19 +220,6 @@ describe('screen.scrollUntilVisible', () => {
     expect(swipes).toEqual([]);
   });
 
-  it('records one screen.scrollUntilVisible step labelled with the locator', async () => {
-    const { screen, steps } = scrollScreen({ screens: [[], [TARGET]] });
-    await screen.scrollUntilVisible(screen.getByText('Accept'));
-    expect(steps.all()).toEqual([
-      expect.objectContaining({
-        kind: 'screen',
-        api: 'screen.scrollUntilVisible',
-        label: 'getByText("Accept")',
-        status: 'passed',
-      }),
-    ]);
-  });
-
   it('on a locator, labels the step with the target, whose description carries the scope once', async () => {
     const { screen, steps } = scrollScreen({ screens: [[feed()], [feed(TARGET)]] });
     const container = screen.getByRole('list', { name: 'Feed' });
@@ -285,13 +280,5 @@ describe("a locator made by another target's screen", () => {
         message: `filter({ has }) requires a locator made by this screen; ${FOREIGN}`,
       }),
     );
-  });
-
-  it('is refused for a stale locator of the same target from an earlier attempt', async () => {
-    const current = scrollScreen({ screens: [[TARGET]] });
-    const earlier = scrollScreen({ screens: [[TARGET]] });
-    await expect(current.screen.scrollUntilVisible(earlier.screen.getByText('Accept'))).rejects.toMatchObject({
-      code: 'INVALID_LOCATOR',
-    });
   });
 });

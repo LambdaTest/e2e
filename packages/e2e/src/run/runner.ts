@@ -36,12 +36,13 @@ import { writeJsonReport } from '../report/write.ts';
 import { createRunEventEmitter, toEventResult, type RunEventSink, type RunExitCode, type RunStatus, type RunEventFact, type SetupStep } from './events.ts';
 import { allocateAppPorts } from './app-ports.ts';
 import { inProcessSpawner } from './in-process.ts';
-import type { ResultRecord, RunError, SerialGroupRecord } from './records.ts';
+import { someSkippedAfterFailure, type ResultRecord, type RunError, type SerialGroupRecord } from './records.ts';
 import { runUnits } from './scheduler.ts';
 import { buildWorkPlans, plannedSlots, type TargetWorkPlan } from './units.ts';
 import { SessionStore } from './sessions.ts';
 import { outputLayout } from './output.ts';
-import { lastFailedIds, readLastRun } from './last-run.ts';
+import { claimRerunDir, pruneArtifacts } from './artifacts.ts';
+import { carryForward, lastFailedIds, readLastRun, reportArtifactPaths, type RerunCollection } from './last-run.ts';
 import { childProcessSpawner } from './worker/handle.ts';
 import { setSecretRegistry } from '../secrets.ts';
 import { withAbort } from '../internal/time.ts';
@@ -393,7 +394,7 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
   };
 
   /**
-   * The exit code is a fold over run state — every result, every run error,
+   * The exit code is a fold over run state — every result and serial group, every run error,
    * the interrupt — never threaded through by hand. A run error recorded
    * anywhere, including during teardown or the report write, reaches the exit
    * code the same way.
@@ -401,7 +402,8 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
   const currentExitCode = (): RunExitCode =>
     combineExitCodes(
       [
-        ...resultExitCodes(results),
+        ...verdictExitCodes(results, serialGroups),
+        ...(loaded.config?.failOnSkippedFailure === true && someSkippedAfterFailure(results, serialGroups) ? [1] : []),
         ...runErrors.map((runError) => exitCodeForCategory(runError.error.category)),
         ...(interruptController.signal.aborted ? [130] : []),
       ].filter((code) => code !== 130 || !(runAborted || stoppedEarly)),
@@ -410,8 +412,16 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
   // Detected once the config names the project root; a report written before
   // that (a config failure) has no checkout to describe.
   let vcs: VcsInfo | undefined;
-  const buildRunReport = (exitCode: RunExitCode): Report1Document =>
-    buildReport({
+  // The report `--last-failed` selected from, once collection has read it;
+  // reporters get it beside this run's report to fold the rerun into it, and
+  // this run's report carries what it owed that this run left out.
+  let lastRun: Report1Document | undefined;
+  // The ids of every test collection found, a setup no selected test needed
+  // among them, and the files it could not collect: what a rerun can still
+  // carry when the report lists no row.
+  let rerunCollection: RerunCollection = { testIds: new Set(), uncollectedFiles: new Set() };
+  const buildRunReport = (exitCode: RunExitCode): Report1Document => {
+    const document = buildReport({
       runId,
       config: loaded.config,
       vcs,
@@ -424,6 +434,9 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
       targetProvenance,
       explore: options.tests?.explore?.snapshot(),
     });
+    const carried = lastRun === undefined ? undefined : carryForward(lastRun, document, rerunCollection);
+    return carried === undefined ? document : { ...document, run: { ...document.run, carried } };
+  };
 
   /**
    * Writes the canonical report and returns its path only once the file
@@ -484,9 +497,6 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
     }
   };
 
-  // The report `--last-failed` selected from, once collection has read it;
-  // reporters get it beside this run's report to fold the rerun into it.
-  let lastRun: Report1Document | undefined;
   /**
    * Whether the run got as far as its tests. Only such a run writes into the
    * output directory: one that stopped before leaves the previous run's
@@ -615,6 +625,10 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
                 );
           const inputs = await selectionInputs(options, config);
           lastRun = inputs.lastRun;
+          rerunCollection = {
+            testIds: new Set(collection.tests.map((test) => test.id)),
+            uncollectedFiles: new Set(collection.uncollected.map((skipped) => skipped.file)),
+          };
           const selection = repeatEach(
             select(
               collection,
@@ -713,15 +727,25 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
     // Tests are about to start, and only now is the previous run's evidence
     // given up: the artifact tree is emptied, so what is there once this run
     // ends is its own and nothing a report no longer names, and this run's
-    // report replaces the last. A run that stopped before here (no test
-    // selected, a collection error, a target that cannot record what it asks,
-    // an app that failed to start, an interrupt) leaves both, and
+    // report replaces the last. A `--last-failed` rerun keeps the evidence
+    // the report it reruns names instead, since that report's results fold
+    // into the rerun's and its carried tests do not run again, and files its
+    // own attempts in a fresh `rerun-<n>` directory beside it, so no attempt
+    // overwrites an earlier one's files. A run that stopped before here (no
+    // test selected, a collection error, a target that cannot record what it
+    // asks, an app that failed to start, an interrupt) leaves both, and
     // `--last-failed` still reads the run that executed. A wipe that fails
     // part way has already given up the old evidence, so this run's report
     // records the failure.
     testsStarted = true;
+    let rerunDir: string | undefined;
     try {
-      await rm(layout.artifacts, { recursive: true, force: true });
+      if (lastRun === undefined) {
+        await rm(layout.artifacts, { recursive: true, force: true });
+      } else {
+        await pruneArtifacts(layout.artifacts, reportArtifactPaths(lastRun));
+        rerunDir = await claimRerunDir(layout.artifacts);
+      }
     } catch (cause) {
       recordFailure(cause, 'launch');
       return;
@@ -747,6 +771,7 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
             inMemory: options.tests,
             runId,
             artifactsRoot,
+            rerunDir,
             sessionStore: store,
             headed: options.headed ?? false,
             debug,
@@ -760,6 +785,7 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
             ports: config.ports,
             runId,
             artifactsRoot,
+            rerunDir,
             headed: options.headed ?? false,
             sessionsRoot: layout.sessions,
             sessionKeyBase64: store.exportKeyForWorker(),
@@ -1020,14 +1046,20 @@ function statusOf(exitCode: RunExitCode): Exclude<RunStatus, 'blocked'> {
   return exitCode === 0 ? 'passed' : exitCode === 1 ? 'failed' : exitCode === 130 ? 'interrupted' : 'error';
 }
 
-function resultExitCodes(results: readonly ResultRecord[]): number[] {
+/**
+ * The exit codes the verdicts imply: a failed test or serial group exits 1,
+ * or its attempts' error category when that is worse. A serial group answers
+ * for its members, whose results carry no attempts, and for a group attempt
+ * that failed before any member ran (a launch), whose members are skipped.
+ */
+function verdictExitCodes(results: readonly ResultRecord[], serialGroups: readonly SerialGroupRecord[]): number[] {
   const codes: number[] = [0];
-  for (const result of results) {
-    switch (result.status) {
+  for (const verdict of [...results, ...serialGroups]) {
+    switch (verdict.status) {
       case 'failed':
       case 'timed-out':
         codes.push(1);
-        for (const attempt of result.attempts) {
+        for (const attempt of verdict.attempts) {
           if (attempt.error !== undefined) codes.push(exitCodeForCategory(attempt.error.category));
         }
         break;
@@ -1045,12 +1077,21 @@ function resultExitCodes(results: readonly ResultRecord[]): number[] {
 class ReporterAbandoned extends Error {}
 
 /**
+ * The built-in reporters that write files beside `report.json`. A forced
+ * interrupt never abandons them: they are local writes, and giving one up
+ * would leave the previous run's `summary.md` or `junit.xml` beside this
+ * run's report, where CI reads it as this run's.
+ */
+const FILE_REPORTERS: ReadonlySet<Reporter> = new Set([STATELESS_REPORTERS.junit, STATELESS_REPORTERS.markdown]);
+
+/**
  * Awaits every reporter's `onRunFinished` at once, each within `timeoutMs`
- * and until a forced interrupt, and collects the summary rows they resolve
- * with. Each reporter gets a signal that aborts on either, so a well-behaved
- * one cancels its own work and leaves no handle holding the process. A
- * reporter that throws, runs out of time, or returns something other than
- * rows is one line on stderr; it can never change the run's outcome.
+ * and, except the built-in file reporters, until a forced interrupt, and
+ * collects the summary rows they resolve with. Each reporter gets a signal
+ * that aborts on either, so a well-behaved one cancels its own work and
+ * leaves no handle holding the process. A reporter that throws, runs out of
+ * time, or returns something other than rows is one line on stderr; it can
+ * never change the run's outcome.
  */
 async function runReporters(
   reporters: readonly Reporter[],
@@ -1072,8 +1113,10 @@ async function runReporters(
         timeoutMs,
       );
       const onForce = (): void => abandon.abort(new ReporterAbandoned('abandoned: the run was forced to stop'));
-      if (force.aborted) onForce();
-      else force.addEventListener('abort', onForce, { once: true });
+      if (!FILE_REPORTERS.has(reporter)) {
+        if (force.aborted) onForce();
+        else force.addEventListener('abort', onForce, { once: true });
+      }
       try {
         const result = await withAbort(
           () => Promise.resolve(onRunFinished.call(reporter, finished, abandon.signal)),

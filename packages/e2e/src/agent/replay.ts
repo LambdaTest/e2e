@@ -12,10 +12,10 @@
  * divergence.
  */
 
-import { anchorsPresent } from '../cache/anchors.ts';
 import { isRelocatableDescriptor, MAIN_LIST_SHARE, relocateDescriptor, type RelocationFailure, type RelocationResult } from '../cache/relocate.ts';
 import { isNodeAction, type ActionTrace, type DerivedReason, type RecordedAction, type TraceTargetDescriptor, type TraceViewport } from '../cache/trace.ts';
 import type { SemanticNode, ViewportPoint } from '../engine/surface.ts';
+import type { RedactedNode } from './observation.ts';
 import { hasCause } from '../internal/errors.ts';
 import { containsPoint, type Box } from '../internal/geometry.ts';
 import { sleep } from '../internal/time.ts';
@@ -35,11 +35,16 @@ const RETRY_DELAYS_MS = [100, 300, 600, 1_000, 3_000] as const;
 const RETRY_TIMEOUT_MS = 15_000;
 
 /** The nodes of one observation, keyed by their per-observation ids. */
-export type ObservedNodes = ReadonlyMap<string, SemanticNode>;
+export type ObservedNodes = ReadonlyMap<string, RedactedNode>;
 
 /** One capture's location and viewport, with nodes only when semantic evidence is available. */
 export type ObservedScreen = {
   readonly viewport: TraceViewport;
+  /**
+   * Where the capture was, as the cache compares it (`appLocation`): on the
+   * app's own origin its path, query, and fragment; elsewhere the whole
+   * location; a device's screen title as it is.
+   */
   readonly path?: string;
 } & (
   | { readonly kind: 'semantic'; readonly nodes: ObservedNodes }
@@ -63,7 +68,6 @@ export interface ReplayHost {
   readonly actions: ExecutorActions;
   readonly signal: AbortSignal;
   remainingMs(): number;
-  readonly redact: (text: string) => string;
 }
 
 export interface ReplayOutcome {
@@ -106,7 +110,8 @@ type PlannedCall =
    * every repeat, because a device renumbers its tree on each look and names
    * a scroll view after its first visible row. A list that filled the screen
    * when recorded (`spans`) and cannot be re-found scrolls as the viewport,
-   * which is what scrolling the main list does; a smaller region hands off.
+   * which is what scrolling the main list does, for that repeat and every
+   * later one; a smaller region hands off.
    * Without a list, the viewport itself is scrolled.
    */
   | {
@@ -230,6 +235,13 @@ export interface ReplayOptions {
    * instead of capturing again: nothing has happened since it was taken.
    */
   readonly initial?: SemanticScreen;
+  /**
+   * Asked before a free action (a navigate, typed text, a key) that follows
+   * another action; true takes the look a targeted action would have taken.
+   * A free action reads no screen, so without it the screen the previous
+   * action left goes unseen.
+   */
+  readonly looksBeforeFree?: () => boolean;
 }
 
 /** Replays one trace until it completes or diverges. */
@@ -276,23 +288,25 @@ export async function replayTrace(
           break;
         }
         case 'free':
+          if (previous !== undefined && options.looksBeforeFree?.() === true) await firstLook(host, look);
           await planned.invoke();
           break;
         case 'scroll': {
-          if (planned.list === undefined) {
-            // A viewport scroll relocates nothing, so each later repeat takes
-            // a settled look of its own, as the live loop did between them.
-            for (let index = 0; index < planned.times; index += 1) {
+          // A scroll on a list is paced by the relocation before each repeat.
+          // A viewport scroll relocates nothing, so each later repeat takes a
+          // settled look of its own, as the live loop did between them. A
+          // list judged lost scrolls as the viewport from then on, instead of
+          // waiting out the relocation backoff again on every repeat.
+          let list = planned.list;
+          for (let index = 0; index < planned.times; index += 1) {
+            if (list === undefined) {
               if (index > 0) await host.observe('held-still');
               await host.actions.scroll(planned.direction);
-              repeated += 1;
+            } else {
+              const scrolled = await scrollOnce(host, planned.direction, list, index === 0 ? look : HELD_STILL);
+              if (scrolled.kind === 'failed') return stop(scrolled.failure, partial());
+              if (scrolled.kind === 'viewport') list = undefined;
             }
-            break;
-          }
-          // A scroll on a list is paced by the relocation before each repeat.
-          for (let index = 0; index < planned.times; index += 1) {
-            const lost = await scrollOnce(host, planned.direction, planned.list, index === 0 ? look : HELD_STILL);
-            if (lost !== undefined) return stop(lost, partial());
             repeated += 1;
           }
           break;
@@ -349,25 +363,24 @@ export async function replayTrace(
 }
 
 /**
- * Verifies a trace's recorded end anchors against the live screen: every
- * anchor must be present again (`anchors.ts`, every recorded field equal) or
- * the replay must not pass on its own. Waits on the same settling backoff
+ * Waits for a trace's recorded end state on the live screen: `holds` (the
+ * recorded delta, `cache/anchors.ts`) must be true of one look, or the
+ * replay must not pass on its own. Waits on the same settling backoff
  * relocation uses, because the recording run's final look came seconds of
  * model latency after its last action and a replay's comes right away: a
  * save still in flight is a wait, not a divergence. A surface that cannot be
  * observed at all is a mismatch too — the executor gets the step and judges
  * the live state; only runtime hard stops propagate.
  */
-export async function verifyAnchors(
+export async function verifyEndState(
   host: ReplayHost,
-  anchors: readonly TraceTargetDescriptor[],
+  holds: (screen: SemanticScreen) => boolean,
   options: { readonly waitMs?: number; readonly initial?: SemanticScreen } = {},
 ): Promise<boolean> {
-  if (anchors.length === 0) return true;
   const startedMs = Date.now();
   try {
-    const present = await pollSettled(host, ({ nodes }) =>
-      anchorsPresent(anchors, nodes, host) ? true : undefined,
+    const present = await pollSettled(host, (screen) =>
+      holds(screen) ? true : undefined,
       options.initial === undefined ? HELD_STILL : { kind: 'in-hand', screen: options.initial },
     );
     if (present === true) return true;
@@ -380,7 +393,7 @@ export async function verifyAnchors(
       await sleep(Math.min(END_WAIT_POLL_MS, deadline - Date.now()), host.signal);
       const screen = await host.observe('raw');
       if (screen.kind === 'pixels' || !host.traceEligible) return false;
-      if (anchorsPresent(anchors, screen.nodes, host)) return true;
+      if (holds(screen)) return true;
     }
     return false;
   } catch (cause) {
@@ -400,10 +413,9 @@ async function relocate(
   descriptor: TraceTargetDescriptor,
   look: Look,
 ): Promise<Relocated> {
-  const options = { redact: host.redact };
   let last: Relocated = { kind: 'failed', failure: 'target-not-found' };
   const settled = await pollSettled(host, (screen): Relocated | undefined => {
-    const result = relocateDescriptor(descriptor, screen.nodes, options);
+    const result = relocateDescriptor(descriptor, screen.nodes);
     if (result.kind === 'failed') {
       last = result.failure === 'target-not-found' ? result : { ...result, screen };
       return retryable(result.failure, descriptor) ? undefined : last;
@@ -428,16 +440,15 @@ async function relocatePair(
   destination: TraceTargetDescriptor,
   look: Look,
 ): Promise<{ readonly kind: 'found'; readonly source: string; readonly destination: string } | { readonly kind: 'failed'; readonly failure: RelocationFailure }> {
-  const options = { redact: host.redact };
   let last: RelocationFailure = 'target-not-found';
   const failed = (descriptor: TraceTargetDescriptor, failure: RelocationFailure) => {
     last = failure;
     return retryable(failure, descriptor) ? undefined : { kind: 'failed' as const, failure };
   };
   const settled = await pollSettled(host, (screen) => {
-    const from = relocateDescriptor(source, screen.nodes, options);
+    const from = relocateDescriptor(source, screen.nodes);
     if (from.kind === 'failed') return failed(source, from.failure);
-    const to = relocateDescriptor(destination, screen.nodes, options);
+    const to = relocateDescriptor(destination, screen.nodes);
     if (to.kind === 'failed') return failed(destination, to.failure);
     return { kind: 'found' as const, source: from.id, destination: to.id };
   }, look);
@@ -458,7 +469,7 @@ function retryable(failure: RelocationFailure, descriptor: TraceTargetDescriptor
 
 /** A relocation with the node it found, or with the screen its look-alikes are on, for a replay that needs boxes. */
 type Relocated =
-  | (Extract<RelocationResult, { kind: 'found' }> & { readonly node: SemanticNode })
+  | (Extract<RelocationResult, { kind: 'found' }> & { readonly node: RedactedNode })
   | Extract<RelocationResult, { failure: 'target-not-found' }>
   | (Extract<RelocationResult, { failure: 'target-ambiguous' }> & { readonly screen: SemanticScreen });
 
@@ -481,7 +492,7 @@ function placeWithin(relocated: Relocated, planned: Extract<PlannedCall, { kind:
   if (viewport.width !== planned.viewport.width || viewport.height !== planned.viewport.height) return undefined;
   const containing = relocated.candidates
     .map((id) => nodes.get(id))
-    .filter((node): node is SemanticNode => node !== undefined && node.states?.hidden !== true)
+    .filter((node): node is RedactedNode => node !== undefined && node.states?.hidden !== true)
     .map((node) => usableBox(node.rect))
     .filter((box): box is Box => box !== undefined && containsPoint(box, planned.point));
   if (containing.length === 1) return inside(containing[0]!);
@@ -519,15 +530,20 @@ function usableBox(rect: SemanticNode['rect']): Box | undefined {
  * viewport for a lost list that filled the screen, or the failure to hand
  * the step off on.
  */
-async function scrollOnce(host: ReplayHost, direction: ScrollDirection, list: ScrolledList, look: Look): Promise<RelocationFailure | undefined> {
+async function scrollOnce(
+  host: ReplayHost,
+  direction: ScrollDirection,
+  list: ScrolledList,
+  look: Look,
+): Promise<{ readonly kind: 'list' | 'viewport' } | { readonly kind: 'failed'; readonly failure: RelocationFailure }> {
   const relocated = await relocate(host, list.descriptor, look);
   if (relocated.kind === 'found') {
     await host.actions.scroll(direction, { id: relocated.id });
-    return undefined;
+    return { kind: 'list' };
   }
-  if ((list.spans ?? 0) < MAIN_LIST_SHARE) return relocated.failure;
+  if ((list.spans ?? 0) < MAIN_LIST_SHARE) return { kind: 'failed', failure: relocated.failure };
   await host.actions.scroll(direction);
-  return undefined;
+  return { kind: 'viewport' };
 }
 
 /**

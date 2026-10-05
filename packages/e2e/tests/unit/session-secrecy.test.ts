@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ResolvedConfig } from '../../src/config/resolve.ts';
 import type { TargetSession } from '../../src/engine/surface.ts';
-import { adoptSecrecy, carriedSecrecy, processSecrets, sessionSecrecy } from '../../src/run/secrecy.ts';
+import { adoptSecrecy, carriedSecrecy, processSecrets, redactForSession, redactsRecordings, sessionSecrecy, staticSecretLedger } from '../../src/run/secrecy.ts';
 
 const STATIC_VALUE = 'static-config-password-5521';
 const PROVIDER_VALUE = 'provider-minted-token-8804';
@@ -43,22 +43,38 @@ describe('session secrecy carried across save and restore', () => {
 });
 
 describe('session exposure', () => {
-  it('rewrites recordings once the engine holds a secret, and withholds pixels only after a fill', () => {
+  it('withholds pixels and carries the taint into a saved session only after a fill', () => {
     const secrecy = sessionSecrecy(newSession(), secrets);
-    expect(secrecy.exposure).toMatchObject({ withholdsPixels: false, redactsRecordings: false, carriesTaint: false });
-    secrecy.exposure.raise('engine');
-    expect(secrecy.exposure).toMatchObject({ withholdsPixels: false, redactsRecordings: true, carriesTaint: false });
+    expect(secrecy.exposure).toMatchObject({ withholdsPixels: false, carriesTaint: false });
+    expect(carriedSecrecy(secrecy, secrets).tainted).toBe(false);
     secrecy.exposure.raise('filled');
-    expect(secrecy.exposure).toMatchObject({ withholdsPixels: true, redactsRecordings: true, carriesTaint: true });
+    expect(secrecy.exposure).toMatchObject({ withholdsPixels: true, carriesTaint: true });
+    expect(carriedSecrecy(secrecy, secrets).tainted).toBe(true);
   });
 
-  it('carries only a fill into a saved session, and never falls back to a lower level', () => {
-    const engineHeld = sessionSecrecy(newSession(), secrets);
-    engineHeld.exposure.raise('engine');
-    expect(carriedSecrecy(engineHeld, secrets).tainted).toBe(false);
-    engineHeld.exposure.raise('filled');
-    engineHeld.exposure.raise('engine');
-    expect(engineHeld.exposure.withholdsPixels).toBe(true);
-    expect(carriedSecrecy(engineHeld, secrets).tainted).toBe(true);
+  it('rewrites recordings whenever the ledger holds a value, filled or not', () => {
+    expect(redactsRecordings(sessionSecrecy(newSession(), secrets))).toBe(true);
+    const unsecret = sessionSecrecy(newSession(), new Map());
+    expect(redactsRecordings(unsecret)).toBe(false);
+    unsecret.ledger.register('token', PROVIDER_VALUE);
+    expect(redactsRecordings(unsecret)).toBe(true);
+  });
+});
+
+describe('redaction before and after a session opens', () => {
+  it('redacts the static values with no session, and every value the session learned once one is open', () => {
+    expect(redactForSession(undefined, secrets, `title ${STATIC_VALUE}`)).toBe('title <secret:password>');
+    // A provider value is not known before it resolves.
+    expect(redactForSession(undefined, secrets, `title ${PROVIDER_VALUE}`)).toBe(`title ${PROVIDER_VALUE}`);
+    const session = newSession();
+    sessionSecrecy(session, secrets).ledger.register('token', PROVIDER_VALUE);
+    expect(redactForSession(session, secrets, `${STATIC_VALUE} ${PROVIDER_VALUE}`)).toBe('<secret:password> <secret:token>');
+  });
+
+  it('keeps one static ledger per secrets map, untouched by what a session learns', () => {
+    const ledger = staticSecretLedger(secrets);
+    expect(staticSecretLedger(secrets)).toBe(ledger);
+    sessionSecrecy(newSession(), secrets).ledger.register('token', PROVIDER_VALUE);
+    expect(ledger.entries()).toEqual([['password', STATIC_VALUE]]);
   });
 });

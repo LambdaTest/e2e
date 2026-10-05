@@ -454,13 +454,6 @@ describe('renderMarkdownReport', () => {
     expect(body).toContain('and 5 more\n</details>');
   });
 
-  it('renders a result from a report written before results carried repeat without a suffix', () => {
-    const legacy = { ...named({ title: 'checkout', status: 'failed' }), repeat: undefined as unknown as number };
-    const body = renderMarkdownReport(page({ status: 'failed', results: [legacy] }));
-    expect(body).toContain('checkout');
-    expect(body).not.toContain('repeat #');
-  });
-
   it('reads a serial member from its group: error, steps, failure evidence, and the artifacts of the attempt that failed', () => {
     const member = named({ title: 'step two', status: 'failed', serialGroupId: 'g1' });
     const group: ReportSerialGroup = {
@@ -506,11 +499,53 @@ describe('renderMarkdownReport', () => {
     expect(renderMarkdownReport(page({ status: 'failed', results: [member] }))).toContain('**🔴 step two**  \n`tests/example.e2e.ts:3`\n\n**failed**\n');
   });
 
-  it('counts zero failed attempts for a flaky test a foreign document gives one attempt, never a negative', () => {
+  it('tells a serial member from the attempt that failed it when the interrupted retry skipped it', () => {
+    const member = named({ title: 'step two', status: 'failed', serialGroupId: 'g1' });
+    const memberRecord = (status: 'failed' | 'skipped') => ({
+      id: `m-${status}`,
+      index: 0,
+      testId: member.testId,
+      status,
+      startedAt: REPORT_AT,
+      durationMs: 40,
+      steps: status === 'failed' ? [step({ index: 0, label: 'tap Next', status: 'failed' })] : [],
+      ...(status === 'failed'
+        ? { error: { category: 'test' as const, code: 'ASSERTION_FAILED', message: 'nope', retryable: false } }
+        : { skip: { cause: 'serial-predecessor-failed' as const, reason: 'group attempt did not reach this member' } }),
+      secondaryErrors: [],
+    });
+    const group: ReportSerialGroup = {
+      id: 'g1',
+      serialId: 'g1',
+      declarationIndex: 0,
+      file: member.file,
+      source: member.source,
+      titlePath: ['group'],
+      targetId: 'web',
+      platform: 'web',
+      agent: 'default',
+      repeat: 0,
+      memberTestIds: [member.testId],
+      status: 'failed',
+      attempts: [
+        { ...attempt({ status: 'failed' }), members: [memberRecord('failed')] },
+        { ...attempt({ status: 'interrupted', error: { code: 'INTERRUPTED', message: 'run interrupted in phase body' } }), members: [memberRecord('skipped')] },
+      ],
+    };
+    const body = renderMarkdownReport(page({ status: 'interrupted', results: [member], serialGroups: [group] }));
+    expect(body).toContain('**ASSERTION_FAILED** at step 1 of 1: `screen.tap tap Next`');
+    expect(body).not.toContain('INTERRUPTED');
+  });
+
+  it('tolerates a document written before results carried repeat, or one giving a flaky test a single attempt', () => {
+    const legacy = { ...named({ title: 'checkout', status: 'failed' }), repeat: undefined as unknown as number };
+    const legacyBody = renderMarkdownReport(page({ status: 'failed', results: [legacy] }));
+    expect(legacyBody).toContain('checkout');
+    expect(legacyBody).not.toContain('repeat #');
     const oneAttempt = named({ title: 'odd', status: 'flaky', attempts: [attempt({ status: 'passed' })] });
-    const body = renderMarkdownReport(page({ results: [oneAttempt] }));
-    expect(body).toContain('| ⚠️ | odd (0 failed attempts first) | 1.2s |');
-    expect(body).not.toContain('-1');
+    const foreignBody = renderMarkdownReport(page({ results: [oneAttempt] }));
+    expect(foreignBody).toContain('| ⚠️ | odd (0 failed attempts first) | 1.2s |');
+    expect(foreignBody).not.toContain('-1');
   });
 
   it('caps the failure blocks and drops what follows before the body outgrows a comment', () => {
@@ -641,20 +676,21 @@ describe('renderMarkdownReport for an exploration', () => {
     expect(body).toContain('open `` https://example.test/`code` `` then ``` https://x.example/``q`` ``` and `` https://y.example/z` `` or plain `https://ok.example`\n');
   });
 
-  it('keeps an assessment that starts like a heading, a list, or a rule as prose', () => {
-    expect(renderMarkdownReport(explored({ summary: '# Verdict\n- the cart is the weak spot' }))).toContain('**Assessment**\n\n\\# Verdict - the cart is the weak spot\n');
-    expect(renderMarkdownReport(explored({ summary: '1. the cart is the weak spot' }))).toContain('**Assessment**\n\n1\\. the cart is the weak spot\n');
-    expect(renderMarkdownReport(explored({ summary: '---' }))).toContain('**Assessment**\n\n\\---\n');
-    expect(renderMarkdownReport(explored({ summary: '1.5 stars, see @octocat' }))).toContain('**Assessment**\n\n1.5 stars, see `@octocat`\n');
-  });
-
-  it('keeps an assessment that starts with a plus, an equals sign, an underscore, or a parenthesised number as prose', () => {
-    expect(renderMarkdownReport(explored({ summary: '+ item' }))).toContain('**Assessment**\n\n\\+ item\n');
-    expect(renderMarkdownReport(explored({ summary: '= title' }))).toContain('**Assessment**\n\n\\= title\n');
-    expect(renderMarkdownReport(explored({ summary: '_ under' }))).toContain('**Assessment**\n\n\\_ under\n');
-    expect(renderMarkdownReport(explored({ summary: '1) list' }))).toContain('**Assessment**\n\n1\\) list\n');
-    // Past the first character the same marks are prose already.
-    expect(renderMarkdownReport(explored({ summary: 'a+b = c_d (1) e' }))).toContain('**Assessment**\n\na+b = c_d (1) e\n');
+  it('keeps an assessment that starts like a heading, a list, a rule, or another block opener as prose', () => {
+    const cases = [
+      ['# Verdict\n- the cart is the weak spot', '\\# Verdict - the cart is the weak spot'],
+      ['1. the cart is the weak spot', '1\\. the cart is the weak spot'],
+      ['---', '\\---'],
+      ['1.5 stars, see @octocat', '1.5 stars, see `@octocat`'],
+      ['+ item', '\\+ item'],
+      ['= title', '\\= title'],
+      ['_ under', '\\_ under'],
+      ['1) list', '1\\) list'],
+      ['a+b = c_d (1) e', 'a+b = c_d (1) e'],
+    ] as const;
+    for (const [summary, prose] of cases) {
+      expect(renderMarkdownReport(explored({ summary })), summary).toContain(`**Assessment**\n\n${prose}\n`);
+    }
   });
 
   it('links the evidence to the run page when there is one, and names the kind when the reader has neither', () => {
@@ -717,6 +753,41 @@ describe('renderMarkdownReport evidence paths', () => {
   });
 });
 
+describe('an interrupted run', () => {
+  const cut = named({
+    title: 'cut short',
+    status: 'interrupted',
+    attempts: [attempt({ status: 'interrupted', error: { code: 'INTERRUPTED', message: 'run interrupted in phase body' } })],
+  });
+
+  it('counts an interrupted test apart from failures and gives it no failure block', () => {
+    const body = renderMarkdownReport(page({ status: 'interrupted', results: [passing, cut] }));
+    expect(body.startsWith('### ⏹️ e2e: 1 interrupted, 1 passed\n')).toBe(true);
+    expect(body).not.toContain('INTERRUPTED');
+    expect(body).toContain('| ⏹️ | cut short |');
+  });
+
+  it('tells the failure an interrupted retry was cut short after', () => {
+    const retried = named({
+      title: 'fails then gets cut',
+      status: 'failed',
+      attempts: [
+        attempt({ status: 'failed', error: { code: 'ASSERTION_FAILED', message: 'no cart' } }),
+        attempt({ status: 'interrupted', error: { code: 'INTERRUPTED', message: 'run interrupted in phase body' } }),
+      ],
+    });
+    const body = renderMarkdownReport(page({ status: 'interrupted', results: [retried] }));
+    expect(body.startsWith('### 🔴 e2e: 1 failed\n')).toBe(true);
+    expect(body).toContain('**ASSERTION_FAILED**');
+    expect(body).not.toContain('**INTERRUPTED**');
+  });
+
+  it('stays red when the run failed before it was stopped', () => {
+    const body = renderMarkdownReport(page({ status: 'interrupted', results: [failing, cut] }));
+    expect(body.startsWith('### 🔴 e2e: 1 failed, 1 interrupted\n')).toBe(true);
+  });
+});
+
 describe('markdownReporter', () => {
   const dirs: string[] = [];
   afterAll(() => {
@@ -771,6 +842,15 @@ describe('markdownReporter', () => {
     expect(text.startsWith('# ✗ members › an email invitation is accepted by the invited account only\n')).toBe(true);
     expect(text).toContain('## Steps');
     expect(text).toContain('- screenshot `.e2e/artifacts/t/attempt-0/screenshot-1.bin`');
+  });
+
+  it('writes no page for an interrupted test, which reached no verdict', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'e2e-markdown-'));
+    dirs.push(root);
+    const cut = named({ title: 'cut short', status: 'interrupted', attempts: [attempt({ status: 'interrupted' })] });
+    const rows = await markdownReporter.onRunFinished!(finished(page({ status: 'interrupted', results: [passing, cut] }), root), new AbortController().signal);
+    expect(rows).toEqual([{ label: 'Markdown', text: path.join('.e2e', 'summary.md') }]);
+    expect(readdirSync(path.join(root, '.e2e'))).toEqual(['summary.md']);
   });
 
   it('writes nothing when the report itself was not written', async () => {
