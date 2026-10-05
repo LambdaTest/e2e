@@ -210,7 +210,8 @@
               "integrations/index",
               "integrations/kernel",
               "integrations/eas",
-              "integrations/testmu"
+              "integrations/testmu",
+              "integrations/testmu-browsers"
             ]
           },
           {
