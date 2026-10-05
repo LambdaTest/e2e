@@ -168,7 +168,9 @@ substring; a `RegExp` matches as written.
   scoping under another locator. Any other `filter` key (`hasNot`,
   `hasNotText`) or an empty `filter({})` is `INVALID_LOCATOR`.
 - `visible: true` drops nodes the page hides (a closed drawer) before the
-  exactly-one rule.
+  exactly-one rule. Visibility is what renders, as `toBeVisible()` reads it:
+  an `aria-hidden` spinner that paints is visible, so `toBeHidden()` waits
+  for it to go.
 - On the web, queries reach open shadow roots and closed roots attached with
   `attachShadow`, not declarative closed roots. `browser.locator(css)`,
   `frameLocator`, and `filter({ hasText })` stop at a closed root; query the
@@ -215,7 +217,7 @@ text, both `[]` at zero. Text is the rendered text, whitespace collapsed: on
 the web what `innerText` reads (`text-transform` applies, `display: none`
 drops out, `<br>` is a space); `toHaveText` reads the same. `isChecked()` is
 `false`, not an error, on a node with no checked state, so query checkable
-controls by role. `waitFor({ state?: 'visible' | 'hidden', timeout? })` waits
+controls by role. `waitFor({ state?: 'attached' | 'detached' | 'visible' | 'hidden', timeout? })` waits
 within `actionTimeout`, else `LOCATOR_NOT_FOUND`. For a value that has to
 settle use `expect`, not a read. Reading a password field's value or
 attributes is `POLICY_DENIED`, as is `toHaveAttribute` on one, negated too.
@@ -224,13 +226,20 @@ attributes is `POLICY_DENIED`, as is `toHaveAttribute` on one, negated too.
 
 `expect(locator)` polls up to `config.assertionTimeout` (5 s) or
 `{ timeout }`; `.not` inverts and passes once the negation has held 1 s
-continuously, so it never returns in under a second. `expect(value,
+continuously, or for the whole `timeout` when that is shorter, so it never
+returns sooner. `expect(value,
 message?)` is synchronous.
 `expect.poll(read, { timeout?, interval?, message? })` re-reads until a value
 matcher passes (`assertionTimeout` and 100 ms by default, stopping with the
-attempt); a throwing read keeps polling, and it is not a report step.
+attempt); a throwing read keeps polling, and it is not a report step. A
+poll that the body or a hook returns without awaiting is cancelled and fails
+that phase with `STEP_NOT_AWAITED`.
 `expect.soft(x)` keeps a failure instead of throwing; the attempt fails
-after the body with every soft failure listed.
+after the body with every soft failure listed. If the body calls `test.skip`,
+the test stays skipped and the failures remain in `secondaryErrors`. The CLI
+shows `Skipped After Failure`, also when a retry skips after an earlier
+failure. Set `failOnSkippedFailure: true` in the config to fail the run with
+exit code 1 in either case. The default is `false`; clean skips stay green.
 `expect.any(Class)`, `expect.anything()`, `expect.objectContaining(obj)`,
 `expect.arrayContaining(arr)`, `expect.stringContaining(s)`, and
 `expect.stringMatching(s | RegExp)` stand in for values inside `toEqual`,
@@ -265,8 +274,8 @@ list or tests a RegExp. A failed matcher is `ASSERTION_FAILED`, exit code 1.
 
 Playwright's `{ checked: false }`, `{ enabled: false }`, `{ visible: false }`,
 and `{ attached: false }` flip their matchers, and `{ ignoreCase: true }`
-works on `toHaveText`, `toContainText`, `toHaveAccessibleName`, and
-`toHaveAttribute(name, value)`. Any other option, `indeterminate` or
+works on `toHaveText`, `toContainText`, `toHaveAccessibleName`,
+`toHaveAttribute(name, value)`, and `expect(browser).toHaveURL`. Any other option, `indeterminate` or
 `useInnerText` included, is `INVALID_ARGUMENT`, in JavaScript too.
 
 ## Sign-in sessions
@@ -323,7 +332,9 @@ credentials: {
   A function is read at fill time and redacted only from that fill on.
 - `E2E_USER_<NAME>_USERNAME` and `E2E_USER_<NAME>_PASSWORD` override either
   field per run, even over a function; `<NAME>` is the credential name
-  uppercased, every character outside `[A-Z0-9]` as `_`.
+  uppercased, every character outside `[A-Z0-9]` as `_`. Two credentials (or
+  two secrets) mapping to one variable, `svc-a` and `svc_a`, are
+  `INVALID_CONFIG`.
 - `credentials.user('admin').password` is a `Secret` with no plaintext
   accessor, named `admin.password` to the agent and in reports; `secrets.get()`
   never returns it (separate namespaces). Only `fill()` and `agent.act` params accept it, stringifying it
@@ -334,6 +345,11 @@ credentials: {
   `E2E_SECRET_STRIPE_KEY`; `secrets.get('stripe-key')` is the same kind of
   handle, fills any editable input, and is redacted by name everywhere the
   runner writes.
+- A registered value passed as a plain string (`process.env.STRIPE_KEY` in a
+  title, a URL, a locator, an `agent.act` instruction or param) is redacted
+  too: reports, step labels, the executor, and the model see
+  `<secret:stripe-key>` (and so does the test id, for a value in a title),
+  so the agent cannot type it. Pass the handle.
 
 ## The browser fixture (browser only)
 
@@ -355,14 +371,20 @@ the app opens itself (`target="_blank"`, `window.open`) is not followed:
 - `evaluate(fn | source, arg?)`: runs a function or source string in the
   page, JSON in and out, no closures; a throw in the page is
   `EVALUATE_FAILED`.
-- `route(pattern, handler)`, `unroute(pattern)`: intercept requests;
-  `route.request` has `url`, `method`, `headers`, `postData`. The handler
-  calls exactly one of `fulfill({ status?, headers?, json | body })`,
-  `continue()`, or `abort()`; none or two fails the next step with
-  `ACTION_FAILED`.
-- `waitForResponse(pattern, { timeout? })`: resolves with
-  `{ url, status, headers, json(), text() }`; `text()` and `json()` reject
-  with `ACTION_FAILED` when the body could not be read.
+- `addInitScript(source | { path } | fn)`, `addInitScript(fn, arg)`: runs
+  before the page's own scripts; call it before `app.open`. `arg` is JSON.
+- `route(pattern, handler)`, `unroute(pattern)`: intercept requests, newest
+  route first; `route.request` has `url`, `method`, `headers`, `postData`.
+  The handler calls exactly one of
+  `fulfill({ status?, headers?, contentType?, json | body | path })`,
+  `continue({ url?, method?, headers?, postData? })` (straight to the
+  network), `fallback()` (the route registered before it), or `abort()`;
+  none or two fails the next step with `ACTION_FAILED`, an unsupported
+  option with `INVALID_ARGUMENT`.
+- `waitForResponse(pattern, { timeout? })`: resolves once the headers
+  arrive, with `{ url, status, headers, json(), text() }`; `text()` and
+  `json()` wait for the body (up to the action timeout) and reject with
+  `ACTION_FAILED` when it could not be read.
 - `cookies()`, `setCookies([...])`: a target is an http(s) URL or a domain.
 - `setViewport({ width, height })`: resize.
 - `onDialog('accept' | 'dismiss' | handler)`: awaited; resolves to an async
@@ -391,5 +413,5 @@ A `route`, `unroute`, or `waitForResponse` pattern is a glob string or
   plus value matchers, in a `test.extend` fixture that reads `browser.cookies()`
   when the API needs the session.
 - No sleeps or polling loops; a matcher with a longer `timeout` instead.
-- `await` every step call, else `STEP_NOT_AWAITED` at the line of the call.
+- `await` every step call and `expect.poll`, else `STEP_NOT_AWAITED` at the line of the call.
 - Assert the fact a model produced with `toContain`, not its exact sentence.

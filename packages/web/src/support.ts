@@ -1,6 +1,6 @@
 /** Shared error translation, filename, and swipe helpers for the Playwright engine. */
 
-import type { ElementHandle, Locator as PwLocator, Mouse, Page } from 'playwright';
+import type { ElementHandle, Locator as PwLocator, Mouse, Page } from 'playwright-core';
 import { EngineError, withinCleanupBudget, type EngineCleanupContext, type Momentum, type ScrollDirection, type ViewportPoint, type ViewportSize } from 'e2e/engine';
 import { ConfigurationError, InfrastructureError, TestError } from 'e2e/engine';
 
@@ -58,8 +58,6 @@ type Actionable = Pick<
   | 'dblclick'
   | 'fill'
   | 'press'
-  | 'check'
-  | 'uncheck'
   | 'hover'
   | 'scrollIntoViewIfNeeded'
   | 'selectOption'
@@ -264,11 +262,12 @@ export class ErrorLatch {
 }
 
 /**
- * The runner error classes as their `name` reads. A project loads this engine
- * from its config file in one module realm (tsx) while the runner's core runs
- * in another, so a runner error reaching the engine is often a `TestError`
- * from a copy of `e2e` this module never imported: `instanceof` says no while
- * `name` and `code` still tell the truth.
+ * The runner error classes as their `name` reads. A project can load this
+ * engine against a copy of `e2e` other than the one the runner's core runs
+ * from (and e2e before 0.17 always loaded config in a module realm of its
+ * own), so a runner error reaching the engine can be a `TestError` this
+ * module never imported: `instanceof` says no while `name` and `code` still
+ * tell the truth.
  */
 const CLASSIFIED_NAMES: ReadonlySet<string> = new Set([
   'EngineError',
@@ -351,7 +350,7 @@ const NAVIGATION_RACE_PATTERN =
   /execution context was destroyed|because of a navigation|navigating and changing the content|frame was detached|frame got detached|node is detached from document/i;
 
 /** Whether a Playwright failure describes a read that lost its document to a navigation. */
-function isNavigationRace(cause: unknown): boolean {
+export function isNavigationRace(cause: unknown): boolean {
   return NAVIGATION_RACE_PATTERN.test(message(cause));
 }
 

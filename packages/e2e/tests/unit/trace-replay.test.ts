@@ -1,12 +1,15 @@
 /** Zero-turn replay: typed dispatch, relocation backoff, divergence. */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { AgentError } from '../../src/agent/error.ts';
 import type { ExecutorActions } from '../../src/agent/executor.ts';
-import { replayTrace, verifyAnchors, type ObservedScreen, type ReplayHost } from '../../src/agent/replay.ts';
+import { replayTrace, verifyEndState, type ObservedScreen, type ReplayHost } from '../../src/agent/replay.ts';
+import { deltaHolds } from '../../src/cache/anchors.ts';
+import type { TraceTargetDescriptor } from '../../src/cache/trace.ts';
 import type { SettleMode } from '../../src/agent/settle-policy.ts';
 import type { ActionTrace, RecordedAction } from '../../src/cache/trace.ts';
 import type { SemanticNode } from '../../src/engine/surface.ts';
+import { redactedNodes } from '../helpers/redacted.ts';
 
 const upgrade: SemanticNode = { ref: { id: 'n1', revision: 'r1' }, role: 'button', name: 'Upgrade' };
 const email: SemanticNode = { ref: { id: 'n2', revision: 'r1' }, role: 'textbox', name: 'Email' };
@@ -94,25 +97,20 @@ function makeHost(options: {
     actions,
     signal: new AbortController().signal,
     remainingMs: () => options.remainingMs ?? 60_000,
-    redact: (text: string) => text,
   };
   return host;
 }
 
 /** One observed screen over the given nodes. */
 function screen(nodes: readonly SemanticNode[], viewport = VIEWPORT) {
-  return { kind: 'semantic' as const, nodes: new Map(nodes.map((n) => [n.ref.id, n])), viewport };
+  return { kind: 'semantic' as const, nodes: redactedNodes(nodes), viewport };
 }
 
-describe('verifyAnchors', () => {
+describe('verifyEndState', () => {
   const saved: SemanticNode = { ref: { id: 'm', revision: 'r1' }, role: 'status', name: 'Marker', text: 'saved' };
   const savedAnchor = { role: 'status', name: 'Marker', text: 'saved' };
-
-  it('holds trivially for a trace without anchors, without observing', async () => {
-    const host = makeHost({});
-    await expect(verifyAnchors(host, [])).resolves.toBe(true);
-    expect(host.observations).toBe(0);
-  });
+  const verifyAnchors = (host: ReplayHost, endAnchors: readonly TraceTargetDescriptor[]) =>
+    verifyEndState(host, (live) => deltaHolds({ endAnchors }, live.nodes, new Map()));
 
   it('holds when every anchor is present, counting an ambiguous match as presence', async () => {
     const twin: SemanticNode = { ...saved, ref: { id: 'm2', revision: 'r1' } };
@@ -157,6 +155,24 @@ describe('verifyAnchors', () => {
 });
 
 describe('replayTrace', () => {
+  it('looks at the screen before a free action that follows another one only while the caller asks', async () => {
+    const free = trace([
+      { name: 'navigate', summary: 'navigate to "/newsletter"', url: '/newsletter' },
+      { name: 'typeText', summary: 'type "a@b.c" into the focused field', value: 'a@b.c', replace: false },
+      { name: 'pressKey', summary: 'press "Enter" on the focused field', key: 'Enter' },
+    ]);
+    const asking = makeHost({});
+    let asked = 0;
+    // The caller has seen its route after the first look, and asks no more.
+    await replayTrace(asking, free, { looksBeforeFree: () => (asked += 1) === 1 });
+    expect(asking.calls).toEqual(['navigate', 'typeText', 'pressKey']);
+    expect(asking.looks).toHaveLength(1);
+    expect(asked).toBe(2);
+    const silent = makeHost({});
+    await replayTrace(silent, free);
+    expect(silent.looks).toEqual([]);
+  });
+
   it('replays a full trace and reports completion', async () => {
     const host = makeHost({});
     const outcome = await replayTrace(
@@ -320,14 +336,16 @@ describe('replayTrace', () => {
 
   it('keeps looking while a positioned target is ambiguous, since a form still rendering shows fewer twins', async () => {
     const unnamed = (id: string): SemanticNode => ({ ref: { id, revision: 'r1' }, role: 'textbox' });
-    const host = makeHost({ nodes: [unnamed('a')] });
+    // Unnamed twins are told apart by their place only inside a named container.
+    const row = (fields: SemanticNode[]): SemanticNode[] => [{ ref: { id: 'row', revision: 'r1' }, role: 'listitem', name: 'Shipping', children: fields }, ...fields];
+    const host = makeHost({ nodes: row([unnamed('a')]) });
     let captures = 0;
     host.capture = async () => {
       captures += 1;
       // The first look shows one unnamed textbox where the recording counted two; the form finishes rendering after that.
-      return screen(captures < 3 ? [unnamed('a')] : [unnamed('a'), unnamed('b')]);
+      return screen(captures < 3 ? row([unnamed('a')]) : row([unnamed('a'), unnamed('b')]));
     };
-    const outcome = await replayTrace(host, trace([{ name: 'type', summary: 'type "x" into textbox (2 of 2)', target: { role: 'textbox', position: { index: 1, of: 2 } }, value: 'x' }]));
+    const outcome = await replayTrace(host, trace([{ name: 'type', summary: 'type "x" into textbox in "Shipping" (2 of 2)', target: { role: 'textbox', within: 'Shipping', position: { index: 1, of: 2 } }, value: 'x' }]));
     expect(outcome).toMatchObject({ completed: true, executed: 1 });
     expect(host.calls).toEqual(['type']);
     // The retries between the backoff delays read the screen raw.
@@ -564,6 +582,28 @@ describe('replayTrace: bare-point taps', () => {
     const outcome = await replayTrace(host, trace([{ name: 'scroll', summary: 'scroll down x2', direction: 'down', target: list, times: 2, spans: 0.92 }]));
     expect(outcome).toMatchObject({ completed: true, executed: 1 });
     expect(targets).toEqual([{ direction: 'down', t: undefined }, { direction: 'down', t: undefined }]);
+  });
+
+  it('waits for a lost list that filled the screen once per folded scroll, not once per repeat', async () => {
+    vi.useFakeTimers();
+    vi.setTimerTickMode('nextTimerAsync');
+    try {
+      const targets: unknown[] = [];
+      const host = makeHost({ nodes: [email], onAction: (name, detail) => void (name === 'scroll' && targets.push(detail)) });
+      const startedMs = Date.now();
+      const outcome = await replayTrace(
+        host,
+        trace([{ name: 'scroll', summary: 'scroll down x4', direction: 'down', target: { role: 'group', name: 'Rows 1 to 12' }, times: 4, spans: 0.92 }]),
+      );
+      expect(outcome).toMatchObject({ completed: true, executed: 1 });
+      expect(targets).toEqual(Array.from({ length: 4 }, () => ({ direction: 'down', t: undefined })));
+      // One relocation backoff (the first look and eight raw ones over 14s),
+      // then one settled look before each later repeat, as a viewport scroll takes.
+      expect(Date.now() - startedMs).toBe(14_000);
+      expect(host.looks).toEqual(['held-still', ...Array.from({ length: 8 }, () => 'raw'), 'held-still', 'held-still', 'held-still']);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('counts the repeats of a folded scroll that ran before a later one lost the list', async () => {

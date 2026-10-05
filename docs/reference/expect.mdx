@@ -52,14 +52,17 @@ before passing its result to `expect`.
 | Default timeout | `config.assertionTimeout`, 5000 ms |
 | Override | `{ timeout }` in milliseconds, on every locator and `browser` matcher |
 | Unknown option | `INVALID_ARGUMENT` before the first read, from JavaScript too |
-| Negation grace window | A negated matcher passes after 1000 ms of continuous truth, or after the whole budget when `{ timeout }` is shorter than that |
+| Negation grace window | A negated matcher passes after 1000 ms of continuous truth, or at the deadline when `{ timeout }` is shorter than that and the negation held for the whole budget. The window counts from the moment the first read that saw the negation started, so a slow read counts toward it |
 | Failure code | `ASSERTION_FAILED`, exit code 1 |
 
 Locator strictness: except for `toHaveCount` and the list form of
 `toHaveText` and `toContainText`, a positive matcher requires exactly one
 match; zero matches keep polling until the timeout, and multiple matches fail
-immediately with `LOCATOR_AMBIGUOUS`. `toBeHidden`, negated visibility, and
-negated `toBeAttached` accept zero matches.
+immediately with `LOCATOR_AMBIGUOUS`. `toBeHidden`, `toBeVisible({ visible:
+false })`, `toBeAttached({ attached: false })`, negated visibility, and
+negated `toBeAttached` accept zero matches; for them, and for
+`waitFor({ state: 'detached' })` and `'hidden'`, a locator under a frame that
+is not in the document is zero matches rather than a wait for the frame.
 
 Text comparison is normalized: leading and trailing whitespace is trimmed and
 each run of whitespace collapses to one space. `toHaveText` and
@@ -201,8 +204,8 @@ Every matcher call is a recorded `expect.<matcher>` assertion step.
 export interface BrowserExpectation {
   /** Inverts the matcher. */
   readonly not: BrowserExpectation;
-  /** Waits for the current URL to match. */
-  toHaveURL(expected: string | RegExp, options?: { timeout?: number }): Promise<void>;
+  /** Waits for the current URL to match; `ignoreCase` compares a string case-insensitively and adds the `i` flag to a RegExp, `false` removes it. */
+  toHaveURL(expected: string | RegExp, options?: { ignoreCase?: boolean; timeout?: number }): Promise<void>;
   /** Waits for the current title to match. */
   toHaveTitle(expected: TextMatch, options?: { timeout?: number }): Promise<void>;
   /** Waits for the target's `class` attribute to match: a string is the whole normalized class list, a RegExp is tested against it. */
@@ -212,9 +215,10 @@ export interface BrowserExpectation {
 
 A relative `toHaveURL` string resolves against the base URL and matches
 exactly after normalization; a `RegExp` tests the full URL. Anything else,
-such as a predicate function, is `INVALID_ARGUMENT`. Each `browser` matcher takes
-`timeout` only; any other key, such as Playwright's `ignoreCase` on
-`toHaveURL`, is `INVALID_ARGUMENT`.
+such as a predicate function, is `INVALID_ARGUMENT`. `toHaveURL` also takes
+Playwright's `ignoreCase`, with the locator matchers' semantics. Otherwise each
+`browser` matcher takes `timeout` only; any other key, such as `ignoreCase` on
+`toHaveTitle`, which Playwright does not take either, is `INVALID_ARGUMENT`.
 
 `toHaveClass` polls for the node too: a target that matches nothing yet is one
 more poll, not a failure, until the assertion timeout runs out. An ambiguous
@@ -326,8 +330,11 @@ side is refused.
 `toHaveProperty` walks a dotted path or an array of keys. Use the array form
 when a key contains a dot, or to index an array by number
 (`['lines', 0, 'sku']`). Inherited properties count; a property holding
-`undefined` exists. With a second argument the value at the path must equal it
-by `toEqual` rules.
+`undefined` exists. A string, number, or boolean on the path is read through
+its wrapper object, as in Jest, so `toHaveProperty('label.length', 3)` and
+`toHaveProperty(['label', 0], 'a')` reach into a string; `null` and
+`undefined` have no properties. With a second argument the value at the path
+must equal it by `toEqual` rules.
 
 ### Matching a schema
 
@@ -455,11 +462,15 @@ ASSERTION_FAILED: 2 soft assertions failed
 A soft locator or `browser` matcher is still a recorded `expect.<matcher>` step,
 marked failed, so the report shows where in the flow it landed. A soft value
 matcher is not a step, the same as a hard one; its failure appears in the
-final error only.
+attempt's error records.
 
 When the body throws on its own, or times out, that error stays the
 attempt's verdict and the soft failures are recorded beside it under
-`secondaryErrors`. A body that skips itself with `test.skip(...)` drops them.
+`secondaryErrors`. A body that skips itself with `test.skip(...)` keeps them
+there too. The CLI shows `Skipped After Failure`; set
+[`failOnSkippedFailure: true`](/reference/config) to make that run fail with
+exit code 1. Without that option, the test stays skipped and does not affect
+the exit code.
 
 A soft `toMatchSchema` returns the schema's output when the value matches
 and `undefined` after a kept failure, and its type says so.
@@ -544,3 +555,14 @@ await expect.poll(() => readStatus(), { message: 'the batch never finished' }).n
 
 `expect.poll` is not recorded as a report step; a timeout surfaces only as
 the test's failure.
+
+Await every poll. A poll belongs to the phase that started it: the test body
+(with its fixtures and `beforeEach` hooks), one `afterEach` hook or fixture
+teardown, or one `beforeAll` or `afterAll` hook. When that phase returns while
+the poll still runs, the poll is cancelled and the phase fails with
+`STEP_NOT_AWAITED` at the line of the call, whether or not the poll would
+have passed. It never fails a later test: a poll started by work its phase
+left running, such as a body past its timeout, is cancelled before its first
+read. A body that threw keeps its own
+error and records this one under `secondaryErrors`, and a suite hook reports
+it as `HOOK_FAILED`.

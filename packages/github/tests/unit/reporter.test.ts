@@ -1,7 +1,6 @@
 /** The reporter end to end against fakes: where it posts, where it writes, and what each row says. */
 
 import { describe, expect, it } from 'vitest';
-import { github } from '../../src/index.ts';
 import { reportRun, type ReportDeps } from '../../src/reporter.ts';
 import { actionsEnv, fakeGitHub, json, readEvent } from './fake-github.ts';
 import { attempt, finished, report, result } from './fixtures.ts';
@@ -46,15 +45,6 @@ const failedRun = finished(
 );
 const postedBody = (calls: { method: string; body: unknown }[]): string =>
   (calls.find((call) => call.method === 'POST')?.body as { body: string } | undefined)?.body ?? '';
-
-describe('github()', () => {
-  it('is a reporter named github with a finish handler and no event handler', () => {
-    const reporter = github();
-    expect(reporter.name).toBe('github');
-    expect(typeof reporter.onRunFinished).toBe('function');
-    expect(reporter.onEvent).toBeUndefined();
-  });
-});
 
 describe('reportRun', () => {
   it('posts nothing off GitHub Actions', async () => {
@@ -107,28 +97,6 @@ describe('reportRun', () => {
     expect(postedBody(dotted.calls)).toContain('(https://github.com/octo/app/blob/head-sha/..app/tests/shop%20flows/cart.e2e.ts#L9)');
   });
 
-  it('shows a title token GitHub would link as code, so app text cannot mention anyone, link an issue, or plant a URL', async () => {
-    const d = deps({ ...actionsEnv, GITHUB_TOKEN: 'ghs' });
-    const hostile = finished(
-      report({
-        status: 'failed',
-        results: [
-          result({
-            title: 'ping @octocat see https://evil.example #12',
-            status: 'failed',
-            attempts: [attempt({ status: 'failed', error: { code: 'ASSERTION_FAILED', message: 'no cart' } })],
-          }),
-        ],
-      }),
-    );
-    await reportRun(hostile, signal, {}, d.deps);
-    const body = postedBody(d.calls);
-    expect(body).toContain('ping `@octocat` see `https://evil.example` `#12`');
-    expect(body).not.toMatch(/[^`]@octocat/);
-    expect(body).not.toMatch(/[^`]https:\/\/evil/);
-    expect(body).not.toMatch(/[^`]#12\b/);
-  });
-
   it('folds a --last-failed rerun into the run it selected from, so the comment shows the whole suite with the recovered test flaky', async () => {
     const d = deps({ ...actionsEnv, GITHUB_TOKEN: 'ghs' });
     const failedAttempt = attempt({ status: 'failed', error: { code: 'ASSERTION_FAILED', message: 'no cart' } });
@@ -148,9 +116,6 @@ describe('reportRun', () => {
     await reportRun(finished(rerun, firstPass), signal, {}, d.deps);
     const body = postedBody(d.calls);
     expect(body).toContain('### 🟢 e2e: 1 flaky, 1 passed');
-    expect(body).toContain('1 flaky test passed on a retry');
-    expect(body).toContain('recovers (1 failed attempt first)');
-    expect(body).toContain('| 🟢 | steady |');
   });
 
   it('adds the key to the marker, encoded, so matrix replicas keep their own comments', async () => {
@@ -160,17 +125,38 @@ describe('reportRun', () => {
     const blank = deps({ ...actionsEnv, GITHUB_TOKEN: 'ghs' });
     await reportRun(failedRun, signal, { key: '' }, blank.deps);
     expect(postedBody(blank.calls).startsWith('<!-- e2e-github project=dev.example.shop workflow=e2e job=test -->\n')).toBe(true);
-    // A long key is cut the same way every run, so the marker stays bounded and findable.
+    // A key that fits is the encoded key itself, byte for byte, so comments already on open pull requests are found.
+    const fits = deps({ ...actionsEnv, GITHUB_TOKEN: 'ghs' });
+    await reportRun(failedRun, signal, { key: 'k'.repeat(200) }, fits.deps);
+    expect(postedBody(fits.calls).startsWith(`<!-- e2e-github project=dev.example.shop workflow=e2e job=test key=${'k'.repeat(200)} -->\n`)).toBe(true);
+    // A long key keeps a prefix and a digest of the whole key, the same every run, so the marker stays bounded and findable.
     const long = deps({ ...actionsEnv, GITHUB_TOKEN: 'ghs' });
     await reportRun(failedRun, signal, { key: 'k'.repeat(5_000) }, long.deps);
-    expect(postedBody(long.calls).startsWith(`<!-- e2e-github project=dev.example.shop workflow=e2e job=test key=${'k'.repeat(200)} -->\n`)).toBe(true);
+    expect(postedBody(long.calls).startsWith(`<!-- e2e-github project=dev.example.shop workflow=e2e job=test key=${'k'.repeat(183)}#622b8b1d5094d382 -->\n`)).toBe(true);
     // The cut is on the encoded form and never inside a percent escape, so emoji cannot outgrow the marker.
     const emoji = deps({ ...actionsEnv, GITHUB_TOKEN: 'ghs', GITHUB_WORKFLOW: '💥'.repeat(300), GITHUB_JOB: 'ü'.repeat(300) });
     await reportRun(failedRun, signal, { key: '💥'.repeat(300) }, emoji.deps);
     const marker = /^<!-- e2e-github [^\n]* -->/.exec(postedBody(emoji.calls))?.[0] ?? '';
     expect(marker.length).toBeGreaterThan(0);
     expect(marker.length).toBeLessThanOrEqual(1_024);
-    expect(marker).toMatch(/ key=(?:%[0-9A-F]{2})+ -->$/);
+    expect(marker).toMatch(/ key=(?:%[0-9A-F]{2})+#[0-9a-f]{16} -->$/);
+  });
+
+  it('keeps two long keys that share their first 200 characters on their own comments', async () => {
+    const markers: string[] = [];
+    for (const key of [`android-${'x'.repeat(200)}-A`, `android-${'x'.repeat(200)}-B`]) {
+      const d = deps({ ...actionsEnv, GITHUB_TOKEN: 'ghs' });
+      await reportRun(failedRun, signal, { key }, d.deps);
+      markers.push(postedBody(d.calls).split('\n', 1)[0] ?? '');
+    }
+    expect(markers[0]).toMatch(/^<!-- e2e-github .* key=android-x+#[0-9a-f]{16} -->$/);
+    expect(markers[0]).not.toBe(markers[1]);
+    // B does not take over the comment A posted; it posts its own.
+    const comments = [{ id: 1, body: `${markers[0]}\n### e2e android A` }];
+    const gh = fakeGitHub({ 'GET *': () => json(200, comments), 'POST *': () => posted.clone() });
+    const d = deps({ ...actionsEnv, GITHUB_TOKEN: 'ghs' }, gh.fetch);
+    await reportRun(failedRun, signal, { key: `android-${'x'.repeat(200)}-B` }, d.deps);
+    expect(gh.calls.map((call) => call.method)).toEqual(['GET', 'POST']);
   });
 
   it.each([

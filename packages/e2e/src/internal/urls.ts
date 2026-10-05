@@ -2,7 +2,7 @@
 
 import { ConfigurationError } from './errors.ts';
 import { testPattern } from './regexp.ts';
-import { toTextPattern } from './text.ts';
+import { toTextPattern, withIgnoreCase } from './text.ts';
 
 export interface NormalizedBaseUrl {
   /** Serialized base URL without trailing artifacts beyond the normalized path. */
@@ -110,13 +110,18 @@ export function isImplicitTestHost(hostname: string): boolean {
   return isLoopbackHost(hostname) || hostname.endsWith('.test');
 }
 
-const FORBIDDEN_PROTOCOLS = new Set(['file:', 'data:', 'javascript:']);
+const NAVIGABLE_PROTOCOLS = new Set(['http:', 'https:']);
+
+/** The one non-http(s) page navigation opens: empty, with no local or inline content. */
+const BLANK_PAGE = 'about:blank';
 
 /**
- * Resolves a navigation URL against the base and refuses the schemes no test
- * may open. Returns the absolute URL string. Any http(s) origin is admitted:
- * a click can reach one just as well, so a gate on typed navigation alone
- * would guard nothing.
+ * Resolves a navigation URL against the base and refuses every scheme but
+ * http(s), except the exact `about:blank`. Returns the absolute URL string.
+ * Any http(s) origin is admitted: a click can reach one just as well, so a
+ * gate on typed navigation alone would guard nothing. The rule is an
+ * allowlist because a browser wraps and nests schemes (`view-source:file:`,
+ * `blob:`, `filesystem:`), and a list of forbidden ones misses the wrapper.
  */
 export function resolveNavigationUrl(input: string, base: NormalizedBaseUrl | undefined): { url: string } {
   let url: URL;
@@ -133,7 +138,7 @@ export function resolveNavigationUrl(input: string, base: NormalizedBaseUrl | un
     }
     throw new ConfigurationError('POLICY_DENIED', `malformed URL: ${input}`);
   }
-  if (FORBIDDEN_PROTOCOLS.has(url.protocol)) {
+  if (!NAVIGABLE_PROTOCOLS.has(url.protocol) && url.href !== BLANK_PAGE) {
     throw new ConfigurationError('POLICY_DENIED', `forbidden URL scheme: ${url.protocol}`);
   }
   return { url: url.href };
@@ -179,9 +184,16 @@ export function sameSite(url: string | URL, site: string): boolean {
  * Relative expected strings resolve against the base URL; string comparison is
  * exact after WHATWG serialization; regexps test the complete serialized URL.
  * Anything else is `INVALID_ARGUMENT`, the `toTextPattern` rule.
+ * `ignoreCase` is Playwright's: `true` compares a string case-insensitively
+ * and adds the `i` flag to a regexp, `false` removes it.
  */
-export function urlMatches(current: string, expected: string | RegExp, baseHref: string): boolean {
-  const pattern = toTextPattern(expected);
+export function urlMatches(
+  current: string,
+  expected: string | RegExp,
+  baseHref: string,
+  ignoreCase?: boolean,
+): boolean {
+  const pattern = withIgnoreCase(toTextPattern(expected), ignoreCase);
   if (pattern.kind === 'regexp') {
     return testPattern(pattern.source, pattern.flags, serializeForComparison(current));
   }
@@ -191,7 +203,10 @@ export function urlMatches(current: string, expected: string | RegExp, baseHref:
   } catch {
     return false;
   }
-  return serializeForComparison(current) === expectedUrl.href;
+  const actual = serializeForComparison(current);
+  return ignoreCase === true
+    ? actual.toLowerCase() === expectedUrl.href.toLowerCase()
+    : actual === expectedUrl.href;
 }
 
 function serializeForComparison(url: string): string {

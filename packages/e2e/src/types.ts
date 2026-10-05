@@ -334,7 +334,7 @@ export interface TextMatchOptions {
 /**
  * Role query options. A role query never matches a node hidden from the
  * accessibility tree, on every engine; `visible` (inherited) is the one knob
- * that narrows the other query kinds the same way.
+ * that narrows the other query kinds, to the nodes `toBeVisible()` accepts.
  */
 export interface RoleOptions extends TextMatchOptions {
   /** Accessible name filter. */
@@ -515,8 +515,12 @@ export interface Locator extends Screen {
   all(): Promise<Locator[]>;
   /** Reads the normalized text of every current match, without auto-waiting; empty when nothing matches. */
   allTextContents(): Promise<string[]>;
-  /** Waits for the requested locator state. */
-  waitFor(options?: { state?: 'visible' | 'hidden'; timeout?: number }): Promise<void>;
+  /**
+   * Waits for the requested locator state, `visible` by default: `attached`
+   * for one match, visible or not; `detached` for none; `hidden` for none or
+   * a hidden one.
+   */
+  waitFor(options?: { state?: 'attached' | 'detached' | 'visible' | 'hidden'; timeout?: number }): Promise<void>;
   /** Adds deterministic locator filters. */
   filter(options: { hasText?: TextMatch; has?: Locator }): Locator;
   /** Selects the first current match. */
@@ -1177,9 +1181,9 @@ export interface StoredArtifact {
   readonly path: string;
   /**
    * How much of the file the runner masked, as the report records it. A
-   * `download` is `incomplete` unless the runner rewrote it as text after a
-   * secret fill; a store that exports only what the runner vouches for reads
-   * this rather than the kind.
+   * `download` is `incomplete` unless the runner ran it as text through the
+   * session's secret values; a store that exports only what the runner
+   * vouches for reads this rather than the kind.
    */
   readonly redaction: 'complete' | 'not-required' | 'incomplete';
   readonly runId: string;
@@ -1410,6 +1414,8 @@ export interface E2EConfig {
   cleanupTimeout?: number;
   /** Retries per test, 0 through 10; default 1 in CI, else 0. */
   retries?: number;
+  /** Fail the run when a test skips itself after a soft failure or an earlier failed attempt; default false. */
+  failOnSkippedFailure?: boolean;
   /** Parallel workers, 1 through 1024; default 1 in CI, else half the cores. An engine may cap it lower. */
   workers?: number;
   /** `{ store }` hands every artifact to a host store as it is produced. */

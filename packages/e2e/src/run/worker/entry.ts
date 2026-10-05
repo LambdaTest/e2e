@@ -16,7 +16,7 @@ import { AiTraceRecorder, registerAiTraceRecorder } from '../../internal/ai-trac
 import { DebugTrace } from '../../internal/debug.ts';
 import { classifyError, ConfigurationError, serializeError } from '../../internal/errors.ts';
 import { StreamRedactor } from '../../internal/redact.ts';
-import { processSecrets, registerStaticSecrets } from '../secrecy.ts';
+import { processSecrets, registerStaticSecrets, staticSecretLedger } from '../secrecy.ts';
 import { SessionStore } from '../sessions.ts';
 import type {
   ChildProcessInbound,
@@ -27,7 +27,7 @@ import type {
   WorkerToMain,
 } from './protocol.ts';
 import { TargetWorker, type ResolvedUnitPairs, type TargetWorkerDeps } from './session.ts';
-import { isAbandonedStepRejection } from '../steps.ts';
+import { isAbandonedRejection } from '../../internal/abandoned.ts';
 
 /**
  * Outbound messages in flight. `process.send` is asynchronous and a
@@ -161,6 +161,7 @@ async function bootstrap(
     const registration = await collectModule(
       () => importModule(unit.absolutePath, `worker-collect-${collectCounter}`),
       unit.absolutePath,
+      staticSecretLedger(config.allSecrets).redact,
     );
     const collected = collectFromRegistration(config.projectRoot, unit.absolutePath, registration);
     const byId = new Map(collected.tests.map((test) => [test.id, test]));
@@ -187,6 +188,7 @@ async function bootstrap(
     ),
     runId: message.runId,
     artifactsRoot: message.artifactsRoot,
+    rerunDir: message.rerunDir,
     headed: message.headed,
     workerSlot: message.workerSlot,
     env: process.env,
@@ -205,13 +207,13 @@ function main(): void {
   process.on('SIGINT', () => undefined);
   process.on('SIGTERM', () => undefined);
   process.on('uncaughtException', (cause) => fatal(cause));
-  // A step the body did not await rejects on a promise nobody holds once it
-  // is cancelled; the attempt has already recorded it as STEP_NOT_AWAITED.
+  // A step or poll the test did not await rejects on a promise nobody holds
+  // once it is cancelled; the attempt has already recorded it as STEP_NOT_AWAITED.
   // Any other rejection nobody caught is charged to the attempt in flight,
   // or recorded against the last test that finished; only before any test
   // has finished is it the worker's.
   process.on('unhandledRejection', (cause) => {
-    if (isAbandonedStepRejection(cause)) return;
+    if (isAbandonedRejection(cause)) return;
     if (worker?.strayRejection(cause) !== true) fatal(cause);
   });
 

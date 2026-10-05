@@ -2,14 +2,14 @@
 
 import { createHash } from 'node:crypto';
 import { createReadStream, mkdirSync } from 'node:fs';
-import { readFile, stat } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, rmdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { writeFileAtomic } from '../internal/atomic-write.ts';
 import type { ArtifactStore } from '../types.ts';
 import type { ArtifactRegistration, ArtifactSink } from './fixtures.ts';
 import type { ArtifactRecord } from './records.ts';
-import type { SessionSecrecy } from './secrecy.ts';
+import { redactsRecordings, type SessionSecrecy } from './secrecy.ts';
 
 /**
  * How much of each kind the runner masked, unless the registration says. A
@@ -72,9 +72,9 @@ export function createAttemptArtifacts(options: {
   /**
    * The secrecy of the session the attempt runs on, read when a download is
    * registered; undefined (no session open yet) leaves every download as
-   * served. Once a secret reached the session (filled, or held by the
-   * engine), a text-like download is rewritten through its ledger before it
-   * is hashed or stored.
+   * served. While its ledger holds a value (`redactsRecordings`), a
+   * text-like download is rewritten through it before it is hashed or
+   * stored.
    */
   secrecy?: () => SessionSecrecy | undefined;
   /**
@@ -111,7 +111,7 @@ export function createAttemptArtifacts(options: {
       const secrecy: SessionSecrecy | undefined = kind === 'download' && registration?.redaction === undefined ? options.secrecy?.() : undefined;
       pending.push(
         (async () => {
-          if (secrecy !== undefined && secrecy.exposure.redactsRecordings && isTextLike(record.mediaType)) {
+          if (secrecy !== undefined && redactsRecordings(secrecy) && isTextLike(record.mediaType)) {
             record.redaction = await redactDownload(absolute, secrecy);
           }
           // Without a store the file is streamed for its size and digest only;
@@ -206,6 +206,69 @@ export function createAttemptArtifacts(options: {
   return { dir, records, sink, settle };
 }
 
+/** What a `--last-failed` rerun's attempt directory is called, `rerun-<n>`, numbered from 1. */
+const RERUN_DIR = /^rerun-([1-9][0-9]*)$/;
+
+/**
+ * Empties an artifact tree down to the files `keep` names, by their report
+ * paths, and removes the directories left empty. A `--last-failed` rerun
+ * starts this way rather than from an empty tree: the evidence the report it
+ * reruns names stays, since that report's results fold into the rerun's and
+ * its carried tests are not run again.
+ */
+export async function pruneArtifacts(root: string, keep: ReadonlySet<string>): Promise<void> {
+  const prune = async (dir: string, relative: string): Promise<boolean> => {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === 'ENOENT') return true;
+      throw cause;
+    }
+    let empty = true;
+    for (const entry of entries) {
+      const reportPath = relative === '' ? entry.name : `${relative}/${entry.name}`;
+      const absolute = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (await prune(absolute, reportPath)) await rmdir(absolute);
+        else empty = false;
+      } else if (keep.has(reportPath)) {
+        empty = false;
+      } else {
+        await rm(absolute, { force: true });
+      }
+    }
+    return empty;
+  };
+  await prune(root, '');
+}
+
+/**
+ * Claims the directory a `--last-failed` rerun's attempts write under, beside
+ * the evidence it kept, and returns its name: `rerun-<n>`, past every number
+ * already there, so the tree reads in run order. The directory is created
+ * exclusively, so no attempt of the rerun writes into a directory an earlier
+ * run's report still names.
+ */
+export async function claimRerunDir(root: string): Promise<string> {
+  await mkdir(root, { recursive: true });
+  const taken = (await readdir(root)).map((name) => Number(RERUN_DIR.exec(name)?.[1] ?? 0));
+  for (let n = Math.max(0, ...taken) + 1; ; n += 1) {
+    const name = `rerun-${n}`;
+    try {
+      await mkdir(path.join(root, name));
+      return name;
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code !== 'EEXIST') throw cause;
+    }
+  }
+}
+
+/** An attempt's report segments, under the rerun's directory on a `--last-failed` rerun. */
+export function attemptSegments(rerunDir: string | undefined, segments: readonly string[]): readonly string[] {
+  return rerunDir === undefined ? segments : [rerunDir, ...segments];
+}
+
 /**
  * Rewrites a text-like download through the session's ledger, the way a
  * trace's text entries are, and returns the redaction the record can claim:
@@ -218,7 +281,7 @@ async function redactDownload(absolute: string, secrecy: SessionSecrecy): Promis
   try {
     const bytes = await readFile(absolute);
     const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
-    const redacted = secrecy.ledger.redact(text);
+    const redacted = secrecy.ledger.redactFragments(text);
     if (redacted !== text) await writeFileAtomic(absolute, redacted);
     return 'complete';
   } catch {

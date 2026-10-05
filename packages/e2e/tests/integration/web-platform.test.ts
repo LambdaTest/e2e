@@ -374,8 +374,8 @@ test('evaluate runs trusted code with JSON arguments', async ({ app, browser }) 
   expect(result).toBe(42);
   const href = await browser.evaluate(() => document.location.pathname);
   expect(href).toBe('/');
-  // tsx compiles this file with esbuild keepNames, which wraps the nested
-  // const in a \`__name\` helper the serialized source must find in the page.
+  // A nested named binding survives serialization whatever the loader
+  // compiled it to (esbuild keepNames once wrapped it in a \`__name\` helper).
   const total = await browser.evaluate((input: { a: number; b: number }) => {
     const pick = (key: 'a' | 'b') => input[key];
     return pick('a') + pick('b');
@@ -419,6 +419,18 @@ test('a nested absent frame counts as zero matches at once', async ({ app, brows
   await app.open('/frame-nested');
   const started = Date.now();
   expect(await browser.frameLocator('#outer').frameLocator('#absent').getByRole('button').count()).toBe(0);
+  expect(Date.now() - started).toBeLessThan(2_000);
+});
+
+test('absence matchers and waits under an absent frame pass at once', async ({ app, browser }) => {
+  await app.open('/frame');
+  const absent = browser.frameLocator('#absent').getByRole('button');
+  const started = Date.now();
+  await expect(absent).toBeAttached({ attached: false, timeout: 3000 });
+  await expect(absent).toBeVisible({ visible: false, timeout: 3000 });
+  await expect(absent).toBeHidden({ timeout: 3000 });
+  await absent.waitFor({ state: 'detached', timeout: 3000 });
+  await absent.waitFor({ state: 'hidden', timeout: 3000 });
   expect(Date.now() - started).toBeLessThan(2_000);
 });
 
@@ -603,6 +615,38 @@ test('a route handler assertion that no step follows, then a teardown that navig
 });
 `;
 
+// A local file the wrapped schemes would load. Each test navigates once and
+// fails with POLICY_DENIED; a navigation that went through fails differently.
+const WRAPPED_SCHEMES = `import { test } from '@e2e-dev/web';
+const marker = new URL('../marker.txt', import.meta.url).href;
+const leakCheck = async (browser) => {
+  const text = String(await browser.evaluate(() => document.body?.innerText ?? ''));
+  if (text.includes('marker-local-file')) throw new Error('LEAKED');
+};
+for (const url of ['view-source:' + marker, 'VIEW-SOURCE:' + marker, '  view-source:' + marker, 'blob:http://127.0.0.1/x', 'about:srcdoc']) {
+  test('app.open refuses ' + JSON.stringify(url), async ({ app, browser }) => {
+    await app.open();
+    await app.open(url);
+    await leakCheck(browser);
+  });
+}
+test('app.open and browser.goto admit about:blank', async ({ app, browser }) => {
+  await app.open();
+  await app.open('about:blank');
+  await browser.goto('about:blank');
+  if ((await browser.url()) !== 'about:blank') throw new Error('not blank: ' + (await browser.url()));
+});
+test('setCookies refuses about:blank', async ({ app, browser }) => {
+  await app.open();
+  await browser.setCookies([{ name: 'flavor', value: 'oatmeal', url: 'about:blank' }]);
+});
+test('browser.goto refuses view-source', async ({ app, browser }) => {
+  await app.open();
+  await browser.goto('view-source:' + marker);
+  await leakCheck(browser);
+});
+`;
+
 describe('web platform integration', () => {
   let app: FixtureApp;
   let outcome: RunOutcome;
@@ -611,7 +655,12 @@ describe('web platform integration', () => {
   beforeAll(async () => {
     app = await startFixtureApp();
     ({ outcome, project } = await runProject(
-      { 'tests/kitchen.e2e.ts': KITCHEN_SINK, 'tests/late-handler.e2e.ts': LATE_HANDLER_THEN_TEARDOWN },
+      {
+        'tests/kitchen.e2e.ts': KITCHEN_SINK,
+        'tests/late-handler.e2e.ts': LATE_HANDLER_THEN_TEARDOWN,
+        'tests/schemes.e2e.ts': WRAPPED_SCHEMES,
+        'marker.txt': 'marker-local-file\n',
+      },
       {
         appUrl: app.url,
         config: { actionTimeout: 5_000, assertionTimeout: 4_000, timeout: 30_000 },
@@ -643,6 +692,7 @@ describe('web platform integration', () => {
       'dialogs are handled by registered handlers',
       'frame locators scope queries into iframes',
       'a nested absent frame counts as zero matches at once',
+      'absence matchers and waits under an absent frame pass at once',
       'nested frame locators resolve each frame inside the one before it',
       'css selectors via browser.locator',
       'contenteditable hosts are textboxes: reached by label, filled, and read as a value',
@@ -805,6 +855,28 @@ describe('web platform integration', () => {
     const result = resultByTitle(outcome, 'forbidden URL schemes are refused');
     expect(result.status).toBe('failed');
     expect(result.attempts[0]!.error?.code).toBe('POLICY_DENIED');
+  });
+
+  it('denies a wrapped or non-http(s) scheme on app.open and browser.goto before it loads', () => {
+    const titles = [
+      'app.open refuses "view-source:file://',
+      'app.open refuses "VIEW-SOURCE:file://',
+      'app.open refuses "  view-source:file://',
+      'app.open refuses "blob:http://127.0.0.1/x"',
+      'app.open refuses "about:srcdoc"',
+      'browser.goto refuses view-source',
+    ];
+    for (const title of titles) {
+      const result = outcome.results.find((candidate) => candidate.test.title.startsWith(title));
+      expect(result, title).toBeDefined();
+      expect(result!.status, title).toBe('failed');
+      expect(result!.attempts[0]!.error?.code, title).toBe('POLICY_DENIED');
+      expect(result!.attempts[0]!.error?.message, title).toMatch(/^forbidden URL scheme: (view-source|blob|about):$/);
+    }
+    expect(resultByTitle(outcome, 'app.open and browser.goto admit about:blank').status).toBe('passed');
+    const cookie = resultByTitle(outcome, 'setCookies refuses about:blank');
+    expect(cookie.status).toBe('failed');
+    expect(cookie.attempts[0]!.error).toMatchObject({ code: 'POLICY_DENIED', message: 'cookie URL must be http(s): about:blank' });
   });
 
   it('exits with configuration precedence and writes report.json', () => {

@@ -6,19 +6,23 @@ type EvaluationResult =
   | { ok: true; value: unknown }
   | { ok: false; message: string };
 
+/** The `__name` helper tsx's `keepNames` output calls, declared beside test code serialized into the page. */
+export const KEEP_NAMES_HELPER = "const __name = (target, value) => Object.defineProperty(target, 'name', { value, configurable: true });";
+
 /**
  * Compiles the page-side error boundary without evaluating the caller's source in this process.
  *
  * A function serialized with `toString()` carries whatever the loader compiled
- * it to. tsx runs esbuild with `keepNames`, which wraps every nested named
- * binding in a module-scoped `__name(target, name)` helper; the page has no
- * such helper, so the same one is declared next to the inlined source.
+ * it to. e2e before 0.17 loaded tests through tsx, whose esbuild `keepNames`
+ * wraps every nested named binding in a module-scoped `__name(target, name)`
+ * helper; the page has no such helper, so the same one is declared next to
+ * the inlined source for as long as this engine supports those runners.
  */
 export function compileEvaluation(source: string, hasArgument: boolean): (arg: unknown) => Promise<EvaluationResult> {
   try {
     return new Function('arg', `
       return (async () => {
-        const __name = (target, value) => Object.defineProperty(target, 'name', { value, configurable: true });
+        ${KEEP_NAMES_HELPER}
         try {
           return { ok: true, value: await (${source}\n)(${hasArgument ? 'arg' : ''}) };
         } catch (cause) {

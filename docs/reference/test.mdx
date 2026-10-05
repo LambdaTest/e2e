@@ -97,16 +97,23 @@ group titles and then the test's own, are a `COLLECTION_ERROR`.
 
 ## Members
 
-A skipped test never affects the exit code. With `test.only`, other tests
+A skipped test does not affect the exit code by default. With `test.only`, other tests
 are reported as `filtered`, and a CI run fails with `ONLY_IN_CI`.
 
 Call `test.skip(condition, reason)` inside a test for conditions you learn at
 runtime, such as a disabled feature flag. When the condition is true, the call
 throws: the body stops at that line, as Playwright's does, and the test is
 reported `skipped` with `reason`, with no retry. Nothing after the call runs.
-Steps before it stay in the report as they ran, but they do not decide the
-status: a failed `expect.soft` before the call is dropped. Hooks and fixtures still run their teardown. When the condition is
-a precondition, call it first, before any step.
+Steps before it stay in the report as they ran. Soft failures before the call
+remain in the attempt's `secondaryErrors`, and the CLI lists the test under
+`Skipped After Failure`. A failed attempt followed by a skip on retry appears
+there too, with its original error. Hooks and fixtures still run their teardown.
+When the condition is a precondition, call it first, before any step.
+
+Set [`failOnSkippedFailure: true`](/reference/config) to fail the run with exit
+code 1 when a runtime skip follows a failure in that test. The test remains
+`skipped` with its reason, and the skip does not trigger another retry. Clean
+skips and retries that pass are unaffected. The default is `false`.
 
 A setup test cannot skip because other tests depend on its sessions; the
 call fails with `INVALID_ARGUMENT`. Outside a test body, the conditional
@@ -295,7 +302,13 @@ group's attempt. A retry starts fresh. Inside it, `retries`, `trace`,
 `video`, `session`, `platforms`, `requires`, `skip`, `only`, and a nested
 `serial` on a member are collection errors. Set them on the group. The group
 records one trace and one video per group attempt, from the `trace` and
-`video` on the serial `describe` or a group around it.
+`video` on the serial `describe` or a group around it. A group attempt that
+cannot start, because its file fails to load or its session fails to launch,
+fails the first member with that error and skips the rest with cause
+`serial-predecessor-failed`. When the run is interrupted during the launch,
+every member skips instead. On a retry, the members keep the verdicts of
+the attempt before it. The exit code follows the error's category, as for any
+other test.
 
 ## Fixtures
 

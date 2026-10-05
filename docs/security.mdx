@@ -48,7 +48,7 @@ A tool call that breaks a rule fails with `POLICY_DENIED`:
 
 | Denied | Why |
 | --- | --- |
-| Navigation to `file:`, `data:`, or `javascript:` | These URL schemes are forbidden. |
+| Navigation to any scheme but `http:` and `https:`, other than `about:blank` | `file:`, `data:`, `javascript:`, and wrappers such as `view-source:file:` would load local or inline content. |
 | A malformed URL | Nothing is repaired. |
 | A `Secret` reaching a JSON sink | Handles carry no value, and no value may be serialized. |
 | Reading a value, text, or attribute from a secure field, with a getter or a `toHaveValue`, `toHaveText`, `toContainText`, or `toHaveAttribute` matcher | Assert the outcome, not the secret. A withheld value is redacted, not empty or absent. |
@@ -77,10 +77,12 @@ list. Shared hosting domains such as `vercel.app` count as one site, so
 headers can reach other hosts under that domain. `basicAuth` is broader:
 it answers a `401` challenge from any origin.
 
-The runner checks forbidden schemes on explicit navigation: `app.open`, the
-agent's `navigate` verb, and `device.openLink`. `device.openApp` and the
-`open_app` tool take an app id and refuse a link, since the device would
-open one as a URL. The runner does not re-check redirects or attach to popup
+The runner checks the scheme on explicit navigation. `app.open`,
+`browser.goto`, and the agent's `navigate` verb admit `http:`, `https:`,
+and the exact `about:blank`. A device link may use an app's custom scheme, so `device.openLink`
+refuses a list instead: `file:`, `data:`, `javascript:`, `view-source:`,
+`blob:`, and `filesystem:`. `device.openApp` and the `open_app` tool take an
+app id and refuse a link, since the device would open one as a URL. The runner does not re-check redirects or attach to popup
 pages. Register `browser.onDialog` to handle browser dialogs.
 
 ## Secrets
@@ -129,14 +131,29 @@ password on screen is not masked in pixels.
 
 The runner replaces every occurrence of a registered secret value with
 `<secret:name>` in model input, reports, a worker process's console output,
-and the trace text of a session a secret was filled on or an engine option
-holds. It matches the value as written, JSON-escaped, HTML-escaped, and
+trace text, and text downloads. That includes a value the test passes as a
+plain string rather than a `secrets.get()` handle: test and `describe`
+titles, step labels (an `app.open` URL, a locator's text), a `fill`, an
+`agent.act` or `agent.assert` instruction, the strings in `agent.act`
+params, `agentContext`, and an `e2e explore` goal. A plain string is not a
+secret fill: it is protected as text only, and screenshots stay available. Titles are redacted as the test file is collected, so
+the test id, `--grep`, the reporters, and the artifact and failure-page file
+names all see `<secret:name>`, and two titles in one file that differ only
+in a secret value are a duplicate title path. A custom executor's
+`ctx.step` and the built-in agent's prompt carry the marker, so only a
+handle can type the real value.
+
+Matching covers the value as written, JSON-escaped, HTML-escaped, and
 percent-encoded, in any letter case (so a CSS `text-transform` does not hide
 it), and with its whitespace collapsed. Text cut at a length limit is masked
 too when it ends with the first 8 or more characters of a value (half of a
-value shorter than 16). Redaction rewrites only what the runner reports;
-assertions still compare the text the page shows. Secret values never enter
-cache entries.
+value shorter than 16), as written or with its whitespace collapsed, the way
+an engine collapses text before it cuts it. Every string of the observed
+screen, names, text, values, test ids, attributes, selectors, and frame
+paths alike, is redacted once, before the model, an executor's tree, a
+replay cache descriptor, or an end anchor reads it. Redaction rewrites only
+what the runner reports; assertions still compare the text the page shows.
+Secret values and their cut parts never enter cache entries.
 
 A static value shorter than 6 characters is `INVALID_CONFIG`, and a provider
 returning one fails the fill: every occurrence of so short a value would take
@@ -150,35 +167,39 @@ ordinary text with it.
   a hash, is a different string and passes through.
 - A value the app renders in another Unicode normalization form, decomposed
   accents where the secret has composed ones, passes through.
-- Text that widens the whitespace inside the value, or drops it, passes
-  through.
+- Text that drops the whitespace inside the value passes through. Text that
+  widens it passes through too, except on the observed screen: a field whose
+  collapsed form holds the value is kept collapsed and masked.
 - A value spread over several nodes, one character per cell as a PIN pad
   shows it, is not one string in the tree and passes through.
-- Text cut at a length limit is matched by its prefix only in the value's
-  own form: a case mapping that changes length (`ß` shown as `SS`) or
-  whitespace collapsed to one space escapes the prefix rule.
+- A case mapping that changes length (`ß` shown as `SS`) escapes the prefix
+  rule for text cut at a length limit.
+- A title is redacted when its file is collected, before any provider
+  runs, so a value a secret provider returns is not redacted from titles.
 - When tests run in the runner's own process, with the config or tests
   passed in memory by an embedding host, their console output is not
   redacted.
-- A Playwright trace from a session a secret reached, filled or held by the
-  engine, is rewritten before it is kept: any run of 8 or more characters of
-  a value becomes `<secret:name>`, so unrelated text that shares 8 characters
-  with a value is masked too. A base64 or base64url run that decodes to a
-  value or such a fragment (a basic-auth header, a cookie, a token segment)
-  is replaced whole. After a fill, screencast frames are dropped; with only
-  an engine-held secret they are kept. An image the app served that
-  draws the secret survives. A trace the runner cannot rewrite is deleted and
+- A Playwright trace is rewritten before it is kept whenever its session
+  knows a secret value, filled or not: every static one, and a provider's
+  once the session resolved it. Any run of 8 or more characters of a value,
+  its whitespace collapsed or not, becomes `<secret:name>`, so unrelated
+  text that shares 8 characters with a value is masked too. A base64 or
+  base64url run that decodes to a value or such a fragment (a basic-auth
+  header, a cookie, a token segment) is replaced whole. After a fill,
+  screencast frames are dropped; otherwise they are kept. An image the app
+  served that draws the secret survives. A trace the runner cannot rewrite is deleted and
   the attempt records `TRACE_WITHHELD`.
 - A video masks nothing and is labeled `redaction: "incomplete"`. It is
   never recorded unless you ask. A recording a hosted browser or
   device service keeps stays with that service; the report holds only its
   URL.
-- A download is what the app served. Once a secret reached the session,
-  filled or held by the engine, a text download (`text/*` or JSON by file
-  extension) is rewritten the way trace text is and labeled
-  `redaction: "complete"`. Any other download, a binary or one from a
-  session no secret reached, is kept as served and labeled
-  `redaction: "incomplete"`.
+- A download is what the app served. When the session knows a secret
+  value, every whole occurrence of it in a text download (`text/*` or JSON
+  by file extension) is replaced, as in reports, and the download is labeled
+  `redaction: "complete"`. Fragments and base64 runs are matched in traces
+  only. Any other download, a binary, one that is not valid UTF-8 or cannot
+  be rewritten, or one from a session that knows no secret value, is kept
+  as served and labeled `redaction: "incomplete"`.
 - The `headers` a protected preview needs are recorded in the trace as
   request headers. Share that trace as you would the bypass secret.
 - `command.log` is captured as the process writes it.
@@ -214,8 +235,12 @@ actions without consulting a model and are not signed.
 
 The runner validates entries before use. Invalid entries become misses.
 Files are named by a hash of the expected key and refused if larger than
-1 MiB. Entries store actions and a redacted summary; replay executes only
-the actions. Secret fills store a name and authorize the fill again.
+1 MiB. The key holds the agent's context only as a hash of its redacted
+text, so no secret value enters it. Entries store actions and a redacted
+summary; replay executes only the actions. Secret fills store a name and
+authorize the fill again. An entry recorded by one agent never replays for
+another, and one recorded on the app's origin never replays on a page from
+another origin.
 
 `e2e init` ignores `.e2e/cache/` in Git. If you choose to
 [commit recordings](/cache#commit-the-replay-cache), review their actions and typed
@@ -232,9 +257,9 @@ project-relative path you configure.
 | --- | --- | --- |
 | `report.json` | The run record. Errors, reasoning excerpts, and action summaries pass the redactor. | complete |
 | `artifacts/.../*.png` | Screenshots. Secure fields are masked before screenshots are returned or saved as artifacts. | complete |
-| `artifacts/.../trace.zip` | Playwright trace, rewritten after a secret fill or when an engine option holds a secret; screencast frames are dropped after a fill only. | not-required, complete, or deleted |
+| `artifacts/.../trace.zip` | Playwright trace, rewritten whenever its session knows a secret value; screencast frames are dropped after a fill only. | not-required (no secret value), complete, or deleted |
 | `artifacts/.../*.webm`, `*.mp4` | Video, opt-in through `video` or `--video`; `retain-on-failure` keeps only the attempts that did not pass. | incomplete |
-| `artifacts/.../downloads/*` | Files the app served through a download. Text ones are rewritten after a secret fill or when an engine option holds a secret; the rest are kept as served. | complete or incomplete |
+| `artifacts/.../downloads/*` | Files the app served through a download. Text ones are rewritten whenever the session knows a secret value; the rest are kept as served. | complete or incomplete |
 | `artifacts/.../failure/screen.txt` | The redacted tree at the moment of failure. | complete |
 | `ai-trace.json` | Every model call, opt-in via `--ai-trace`. Prompts are the redacted ones the model saw; inline image bytes are replaced by their size. | as the prompt |
 | `sessions/<runId>/` | Encrypted sessions, deleted at cleanup. | encrypted |

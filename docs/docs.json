@@ -134,7 +134,9 @@
             "pages": [
               "index",
               "quickstart",
-              "writing-tests"
+              "goals",
+              "assertions",
+              "locators"
             ]
           },
           {
@@ -150,7 +152,8 @@
             "group": "Mobile",
             "icon": "mobile-screen",
             "pages": [
-              "mobile"
+              "mobile",
+              "physical-devices"
             ]
           },
           {
@@ -165,6 +168,7 @@
             "icon": "wand-magic-sparkles",
             "pages": [
               "models",
+              "decision-models",
               "subscriptions",
               "agents",
               "agent-steps",
@@ -340,6 +344,10 @@
     {
       "source": "/reference/app-web",
       "destination": "/reference/web"
+    },
+    {
+      "source": "/writing-tests",
+      "destination": "/goals"
     }
   ]
 }

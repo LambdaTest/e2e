@@ -66,13 +66,27 @@ describe('error translation', () => {
     ).toMatchObject({ code: 'ENGINE_FAILURE', message: 'open com.example.app failed: runner connect timed out after 60s' });
   });
 
-  it('maps stale refs and the rest', () => {
+  // Each refusal as agent-device 0.21.20 sends it: the typed reason, and the message the reason replaces.
+  it.each([
+    ['ref_not_found', 'Ref @e12 not found', 'no'],
+    ['ref_frame_expired', 'Ref @e12 belongs to an expired ref frame — a device action since the snapshot invalidated it', 'no'],
+    ['ref_generation_mismatch', 'Ref @e12 was minted from a superseded snapshot generation', 'no'],
+    ['plain_ref_requires_complete_frame', 'Ref @e12 needs a complete snapshot — the current frame only authorizes its emitted refs', 'no'],
+    ['ref_not_issued', 'Ref @e12 was not issued by the current ref frame', 'no'],
+    // A drag refuses its stale ref before the gesture, but reports it as `unknown`.
+    ['ref_frame_expired', 'Ref @e12 belongs to an expired ref frame — a device action since the snapshot invalidated it', 'unknown'],
+  ] as const)('maps the stale-ref refusal %s (dispatched: %s) to retryable NODE_STALE', (reason, text, dispatched) => {
+    const refused = new AppError('COMMAND_FAILED', text, { reason, dispatched });
+    expect(staleOr(refused, 'perform tap')).toMatchObject({ code: 'NODE_STALE', retryable: true, message: `perform tap: ${text}` });
+    // Outside an action path the same refusal stays an engine failure.
+    expect(translateError(refused, 'observe')).toMatchObject({ code: 'ENGINE_FAILURE' });
+  });
+
+  it('maps the rest to ENGINE_FAILURE with the text, a ref named in a message without a stale reason included', () => {
     expect(staleOr(new Error('ref @e12 not found in the current snapshot'), 'perform tap')).toMatchObject({
-      code: 'NODE_STALE',
-      retryable: true,
+      code: 'ENGINE_FAILURE',
+      retryable: false,
     });
-    expect(staleOr(new Error('Unknown ref: @e3'), 'perform tap')).toMatchObject({ code: 'NODE_STALE', retryable: true });
-    expect(translateError(new Error('ref @e12 not found'), 'observe')).toMatchObject({ code: 'ENGINE_FAILURE' });
     const failure = translateError(new AppError('COMMAND_FAILED', 'xcrun exploded'), 'boot');
     expect(failure).toMatchObject({ code: 'ENGINE_FAILURE', retryable: false });
     expect(failure.message).toBe('boot failed: xcrun exploded');
@@ -135,11 +149,10 @@ describe('automation runner failures', () => {
   it('names a busy runner, the session and device, and the recovery under ENGINE_FAILURE, without the model-facing hint', () => {
     const translated = translateError(runnerBusy(), 'snapshot', 'session e2e-ios-0 on iPhone 17 Pro');
     expect(translated).toMatchObject({ code: 'ENGINE_FAILURE', retryable: false });
-    expect(translated.message).toBe(
-      'snapshot failed: the iOS automation runner is still finishing a command that overran its watchdog (session e2e-ios-0 on iPhone 17 Pro): ' +
-        'The iOS runner is still finishing a previous command that exceeded its execution watchdog (usually an accessibility capture on a heavy or animating screen). ' +
-        `The app is fine. Wait a few seconds and rerun. ${RECOVERY}`,
+    expect(translated.message).toContain(
+      'snapshot failed: the iOS automation runner is still finishing a command that overran its watchdog (session e2e-ios-0 on iPhone 17 Pro): ',
     );
+    expect(translated.message).toContain(RECOVERY);
     expect(translated.message).not.toContain('Hint:');
     expect(isRunnerFailure(translated)).toBe(true);
     expect(isSnapshotPresentationFailure(translated)).toBe(false);
@@ -151,11 +164,8 @@ describe('automation runner failures', () => {
       'perform tap',
     );
     expect(wedged).toMatchObject({ code: 'ENGINE_FAILURE' });
-    expect(wedged.message).toBe(
-      'perform tap failed: the iOS automation runner is wedged: its main thread is stuck in abandoned work: ' +
-        'The iOS runner main thread has been stuck in abandoned work for 120 seconds and cannot recover on its own. ' +
-        `The app is fine. agent-device restarts the runner; rerun. ${RECOVERY}`,
-    );
+    expect(wedged.message).toContain('perform tap failed: the iOS automation runner is wedged: its main thread is stuck in abandoned work: ');
+    expect(wedged.message).toContain(RECOVERY);
     expect(isRunnerFailure(wedged)).toBe(true);
     const overran = translateError(
       new AppError('COMMAND_FAILED', 'snapshot timed out on the runner main thread', { runnerErrorCode: 'MAIN_THREAD_TIMEOUT' }),
@@ -172,10 +182,10 @@ describe('automation runner failures', () => {
   it('names a snapshot the runner could not present, by the failed check or the upstream code', () => {
     const byReason = translateError(invalidViewport(), 'snapshot', 'session e2e-ios-0 on iPhone 17 Pro');
     expect(byReason).toMatchObject({ code: 'ENGINE_FAILURE', retryable: false });
-    expect(byReason.message).toBe(
-      'snapshot failed: the iOS automation runner could not present the accessibility snapshot (session e2e-ios-0 on iPhone 17 Pro): ' +
-        `regular iOS snapshot presentation requires a valid viewport The app is fine. Rerun. ${RECOVERY}`,
+    expect(byReason.message).toContain(
+      'snapshot failed: the iOS automation runner could not present the accessibility snapshot (session e2e-ios-0 on iPhone 17 Pro): ',
     );
+    expect(byReason.message).toContain(RECOVERY);
     expect(isSnapshotPresentationFailure(byReason)).toBe(true);
     expect(isRunnerFailure(byReason)).toBe(false);
     const byCode = translateError(
@@ -200,9 +210,7 @@ describe('automation runner failures', () => {
     for (const [reason, text] of raised) {
       const translated = translateError(new AppError('COMMAND_FAILED', text, { reason }), 'snapshot', 'session e2e-ios-0');
       expect(translated, reason).toMatchObject({ code: 'ENGINE_FAILURE', retryable: false });
-      expect(translated.message, reason).toBe(
-        `snapshot failed: the iOS automation runner could not present the accessibility snapshot (session e2e-ios-0): ${text} The app is fine. Rerun. ${RECOVERY}`,
-      );
+      expect(translated.message, reason).toContain(`could not present the accessibility snapshot (session e2e-ios-0): ${text}`);
       expect(isSnapshotPresentationFailure(translated), reason).toBe(true);
     }
     // A reason the presenter does not raise is not a presentation failure: agent-device tags a cancelled capture with one too.

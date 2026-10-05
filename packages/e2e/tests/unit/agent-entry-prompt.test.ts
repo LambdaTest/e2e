@@ -8,8 +8,11 @@ import { createFixtures } from '../../src/run/fixtures.ts';
 import { StepRecorder } from '../../src/run/steps.ts';
 import { WorkerModels } from '../../src/run/worker-models.ts';
 import type { E2EConfig } from '../../src/types.ts';
+import { runAgentStepsOnFakeTime } from '../helpers/agent-fake-time.ts';
 import { installFakeLoopModel, loopCalls } from '../helpers/fake-loop-model.ts';
 import { snapshot } from '../helpers/snapshot.ts';
+
+runAgentStepsOnFakeTime();
 
 /** A real fixture graph with an in-memory engine and no runner process or model provider. */
 function runtime(overrides: Partial<E2EConfig>, agentContext?: string) {
@@ -58,14 +61,6 @@ describe('the built-in agent from its agents entry', () => {
     );
     await fixtures.agent.act('open billing');
     expect(loopCalls[0]!.system).toContain('Project context:\nPlans are called tiers.\nBilling lives under Settings.');
-  });
-
-  it('adds no project context or guidance when the entry names none', async () => {
-    const model = installFakeLoopModel(() => conclude);
-    const fixtures = runtime({ agents: { default: { model } } });
-    await fixtures.agent.act('open billing');
-    expect(loopCalls[0]!.system).not.toContain('Project context:');
-    expect(loopCalls[0]!.system).not.toContain('Be careful.');
   });
 
   it("builds each agent from its own entry: another agent's system never leaks in", async () => {

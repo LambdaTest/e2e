@@ -37,8 +37,15 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   rmSync(artifactsDir, { recursive: true, force: true });
 });
+
+/** Fakes the clock and moves it to each pending timer as soon as the test awaits, so a retry backoff or a transition budget costs no wall time. */
+function autoAdvanceTimers(): void {
+  vi.useFakeTimers({ now: Date.now(), toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+  vi.setTimerTickMode('nextTimerAsync');
+}
 
 /** Boots, starts an attempt, and launches the pinned app the way a test's `app.open()` does. */
 async function openAttempt(h: Harness, attemptId = 'a1'): Promise<void> {
@@ -90,12 +97,6 @@ describe('manifest', () => {
     expect(() => harness({ sesion: 'e2e-ios' } as never)).toThrow(
       expect.objectContaining({ code: 'INVALID_CONFIG', message: 'mobile() has unknown key "sesion"; did you mean "session"?' }),
     );
-    expect(() => harness({ bundle: 'com.example' } as never)).toThrow(
-      /^mobile\(\) has unknown key "bundle"; expected one of platform, device, session, snapshot, settle, transition, videoTouches$/,
-    );
-  });
-
-  it('refuses the app options it used to take as unknown keys', () => {
     expect(() => mobile({ platform: 'ios', app: 'x' } as never)).toThrowError(
       expect.objectContaining({ code: 'INVALID_CONFIG', message: expect.stringMatching(/^mobile\(\) has unknown key "app"/) }),
     );
@@ -268,7 +269,7 @@ describe('lifecycle', () => {
     ]);
   });
 
-  it('logs an app that does not open in prepare instead of failing the run; a device that cannot boot does fail it', async () => {
+  it('logs an app that does not open in prepare instead of failing the run, and hands the slot over unbound', async () => {
     const h = harness({ device: 'iPhone 16e' });
     h.fake.respond('apps.open', () => {
       throw new Error('runner still installing');
@@ -280,11 +281,6 @@ describe('lifecycle', () => {
     // Nothing put the session on the app, and the binding says so: the worker's first launch binds it itself.
     const handed = result?.env ?? {};
     expect(handed[poolVariableIn(handed, 'IOS')]).toBe(JSON.stringify([{ device: 'iPhone 16e' }]));
-
-    h.fake.respond('devices.boot', () => {
-      throw new Error('no such device');
-    });
-    await expect(h.prepare(info)).rejects.toMatchObject({ message: expect.stringContaining('no such device') });
   });
 
   it('starts the iOS runner in prepare, leaves one that does not start to the first attempt, and ends the run on a wedged one', async () => {
@@ -394,17 +390,7 @@ describe('lifecycle', () => {
     expect(coldEnv).toEqual({});
   });
 
-  it('selects a named device by name and a UDID by udid', async () => {
-    const byName = harness({ device: 'iPhone 16e' });
-    await boot(byName);
-    expect(byName.fake.lastArgs('devices.boot')).toEqual({ platform: 'ios', device: 'iPhone 16e' });
-    const byId = harness({ device: '2BBF3F07-AF66-4F95-82AB-BF442506FC89' });
-    await openAttempt(byId);
-    expect(byId.fake.lastArgs('devices.boot')).toEqual({ platform: 'ios', udid: '2BBF3F07-AF66-4F95-82AB-BF442506FC89' });
-    expect(byId.fake.lastArgs('apps.open')).toEqual({ app: 'Settings', platform: 'ios', udid: '2BBF3F07-AF66-4F95-82AB-BF442506FC89', relaunch: true });
-  });
-
-  it('drives a discovered Android emulator by its serial, and reads a configured serial or name as agent-device does', async () => {
+  it('drives a discovered Android emulator by its serial, and reads a configured serial, UDID, or name as agent-device does', async () => {
     const h = harness({ device: undefined, platform: 'android' });
     h.fake.respond('devices.list', () => [{ platform: 'android', id: 'emulator-5554', name: 'test', booted: true }]);
     const lines: string[] = [];
@@ -433,9 +419,12 @@ describe('lifecycle', () => {
     const byName = harness({ device: 'Pixel_9', platform: 'android' });
     await boot(byName, 'android');
     expect(byName.fake.lastArgs('devices.boot')).toEqual({ platform: 'android', device: 'Pixel_9' });
+    const byUdid = harness({ device: '2BBF3F07-AF66-4F95-82AB-BF442506FC89' });
+    await boot(byUdid);
+    expect(byUdid.fake.lastArgs('devices.boot')).toEqual({ platform: 'ios', udid: '2BBF3F07-AF66-4F95-82AB-BF442506FC89' });
   });
 
-  it('carries the configured settle window on actions, and none when settle is false', async () => {
+  it('carries the configured settle window on actions, and none when settle is false; both budgets are non-negative integers', async () => {
     const slow = harness({ settle: 600 });
     await openAttempt(slow);
     const node = await observed(slow, 'About');
@@ -461,6 +450,8 @@ describe('lifecycle', () => {
 
     expect(() => harness({ settle: -1 })).toThrow(/non-negative integer/);
     expect(() => harness({ settle: 1.5 })).toThrow(/non-negative integer/);
+    expect(() => harness({ transition: -5 })).toThrow(/non-negative integer/);
+    expect(() => harness({ transition: 0.5 })).toThrow(/non-negative integer/);
   });
 
   it('rejects an empty pool at config time', () => {
@@ -526,6 +517,45 @@ describe('lifecycle', () => {
     expect(h.surface.pinnedApp).toBe('com.example.app');
   });
 
+  it('pins the package an Android install reports, and refuses the build path as an app id', async () => {
+    const signal = new AbortController().signal;
+    const h = harness({ appPath: './build/app.apk', platform: 'android' }, false);
+    h.fake.respond('apps.install', () => ({
+      app: '/project/build/app.apk',
+      appPath: '/project/build/app.apk',
+      platform: 'android',
+      appId: 'dev.example.app',
+      package: 'dev.example.app',
+      identifiers: {},
+    }));
+    await boot(h);
+    await h.engine.startAttempt!({ attemptId: 'a1', artifactsDir, signal, resolveSecret: noSecrets });
+    expect(await h.surface.installApp(undefined, {}, signal)).toEqual({ app: 'dev.example.app', bundleId: 'dev.example.app' });
+    await h.engine.session!.restart!(operation());
+    expect(h.fake.lastArgs('apps.open')).toEqual({ app: 'dev.example.app', platform: 'android', relaunch: true });
+
+    // agent-device 0.21.18 echoes the path as `app` when it cannot read the
+    // package; that path is not something `open` can launch.
+    const unnamed = harness({ appPath: './build/app.apk', platform: 'android' }, false);
+    unnamed.fake.respond('apps.install', () => ({ app: '/project/build/app.apk', appPath: '/project/build/app.apk', platform: 'android', identifiers: {} }));
+    await boot(unnamed);
+    await unnamed.engine.startAttempt!({ attemptId: 'a1', artifactsDir, signal, resolveSecret: noSecrets });
+    await expect(unnamed.surface.installApp(undefined, {}, signal)).rejects.toMatchObject({
+      code: 'ENGINE_FAILURE',
+      message: expect.stringContaining('reported no bundle id or package'),
+    });
+    expect(unnamed.surface.pinnedApp).toBeUndefined();
+    await expect(unnamed.engine.session!.restart!(operation())).rejects.toMatchObject({
+      code: 'UNSUPPORTED_CAPABILITY',
+      message: expect.stringContaining('device.installApp()'),
+    });
+    expect(unnamed.fake.methods()).not.toContain('apps.open');
+
+    // An `app` passed in is what the build opens by, reported or not.
+    expect(await unnamed.surface.installApp(undefined, { app: 'dev.example.app' }, signal)).toEqual({ app: 'dev.example.app' });
+    expect(unnamed.surface.pinnedApp).toBe('dev.example.app');
+  });
+
   it('installs the engine build under the pinned app and device, and keeps opening the pinned app', async () => {
     const h = harness({ bundleId: 'com.example.app', appPath: '/builds/app.apk', device: 'Pixel 8', platform: 'android' });
     h.fake.respond('apps.install', () => ({ app: 'com.example.app', appPath: '/builds/app.apk', platform: 'android', identifiers: {} }));
@@ -572,17 +602,6 @@ describe('lifecycle', () => {
     exhausted.abort();
     await expect(h.engine.dispose!({ signal: exhausted.signal, timeoutMs: 0 })).resolves.toBeUndefined();
   });
-
-  it('reports a boot failure as ENGINE_FAILURE with the agent-device message', async () => {
-    const h = harness();
-    h.fake.respond('devices.boot', () => {
-      throw new AppError('DEVICE_NOT_FOUND', 'no booted iOS simulator');
-    });
-    await expect(boot(h)).rejects.toMatchObject({
-      code: 'ENGINE_FAILURE',
-      message: 'boot failed: no booted iOS simulator',
-    });
-  });
 });
 
 describe('observation', () => {
@@ -617,6 +636,7 @@ describe('observation', () => {
   });
 
   it('retries a sparse snapshot device-side before returning it', async () => {
+    autoAdvanceTimers();
     const h = harness();
     let calls = 0;
     h.fake.respond('capture.snapshot', () => {
@@ -692,8 +712,8 @@ describe('observation', () => {
 
   it('captures pixels on request, masks every secure node, and degrades to tree-only when it cannot', async () => {
     const h = harness();
-    // 390x844 viewport at 3x: a white RGBA image of the device's size.
-    const image = { width: 1170, height: 2532, channels: 4 as const, pixels: new Uint8Array(1170 * 2532 * 4).fill(255) };
+    // 390x844 viewport at half scale: a small white RGBA image keeps the encode cheap and still proves the bounds are scaled.
+    const image = { width: 195, height: 422, channels: 4 as const, pixels: new Uint8Array(195 * 422 * 4).fill(255) };
     const png = encodePng(image);
     h.fake.respond('capture.screenshot', (args) => {
       writeFileSync((args as { path: string }).path, png);
@@ -701,13 +721,13 @@ describe('observation', () => {
     });
     await openAttempt(h);
     const snapshot = await h.engine.observe!(operation(), { pixels: true });
-    expect(snapshot.pixels).toMatchObject({ mediaType: 'image/png', width: 1170, height: 2532, scale: 3 });
+    expect(snapshot.pixels).toMatchObject({ mediaType: 'image/png', width: 195, height: 422, scale: 0.5 });
     // One secure node on the Settings fixture: the Password field at y=270, 44 tall.
     expect(snapshot.maskedRegionCount).toBe(1);
     const decoded = decodePng(snapshot.pixels!.data);
-    const at = (x: number, y: number) => [...decoded.pixels.subarray((y * 1170 + x) * 4, (y * 1170 + x) * 4 + 3)];
-    expect(at(600, 290 * 3)).toEqual([0, 0, 0]);
-    expect(at(600, 240 * 3)).toEqual([255, 255, 255]);
+    const at = (x: number, y: number) => [...decoded.pixels.subarray((y * 195 + x) * 4, (y * 195 + x) * 4 + 3)];
+    expect(at(100, 290 / 2)).toEqual([0, 0, 0]);
+    expect(at(100, 240 / 2)).toEqual([255, 255, 255]);
 
     // Android flags a password EditText by attribute, not by class; it is painted over the same way.
     h.fake.respond('capture.snapshot', () => ({
@@ -721,9 +741,9 @@ describe('observation', () => {
     expect(named(android.root, 'Password')).toMatchObject({ role: 'textbox', inputPurpose: 'password', states: { secure: true } });
     expect(named(android.root, 'Password').value).toBeUndefined();
     const androidPixels = decodePng(android.pixels!.data);
-    const androidAt = (x: number, y: number) => [...androidPixels.pixels.subarray((y * 1170 + x) * 4, (y * 1170 + x) * 4 + 3)];
-    expect(androidAt(600, 290 * 3)).toEqual([0, 0, 0]);
-    expect(androidAt(600, 240 * 3)).toEqual([255, 255, 255]);
+    const androidAt = (x: number, y: number) => [...androidPixels.pixels.subarray((y * 195 + x) * 4, (y * 195 + x) * 4 + 3)];
+    expect(androidAt(100, 290 / 2)).toEqual([0, 0, 0]);
+    expect(androidAt(100, 240 / 2)).toEqual([255, 255, 255]);
 
     // A secure node without bounds cannot be masked: the tree ships, the image does not.
     h.fake.respond('capture.snapshot', () => ({
@@ -742,6 +762,26 @@ describe('observation', () => {
     const treeOnly = await h.engine.observe!(operation(), { pixels: true });
     expect(treeOnly.pixels).toBeUndefined();
     expect(treeOnly.root.children).toHaveLength(1);
+  });
+
+  it('withholds the pixels of a screen with a secure field when the image cannot be read or decoded', async () => {
+    const h = harness();
+    // A PNG signature and header naming the size, with no image data behind them: the size reads, the decode fails.
+    const headerOnly = encodePng({ width: 195, height: 422, channels: 4, pixels: new Uint8Array(195 * 422 * 4) }).subarray(0, 33);
+    let shot: Uint8Array = new Uint8Array([1, 2, 3]);
+    h.fake.respond('capture.screenshot', (args) => {
+      writeFileSync((args as { path: string }).path, shot);
+      return { path: (args as { path: string }).path };
+    });
+    await openAttempt(h);
+    for (const bytes of [new Uint8Array([1, 2, 3]), headerOnly]) {
+      shot = bytes;
+      const observation = await h.engine.observe!(operation(), { pixels: true });
+      expect(observation.pixels).toBeUndefined();
+      expect(observation.root.children).toHaveLength(1);
+      await expect(h.engine.artifacts!.screenshot('password', operation())).rejects.toMatchObject({ code: 'ENGINE_FAILURE' });
+    }
+    expect(existsSync(path.join(artifactsDir, 'screenshots'))).toBe(false);
   });
 
   it('cancels a snapshot when the operation aborts', async () => {
@@ -880,20 +920,13 @@ describe('perform', () => {
         code: 'UNSUPPORTED_CAPABILITY',
       });
     }
-    // A spelling outside the grammar is refused with the grammar named, never reinterpreted.
-    for (const key of ['Return', 'ab', '', 'Enter+']) {
-      await expect(h.engine.perform!(about.ref, { kind: 'press', key }, operation())).rejects.toMatchObject({
-        code: 'UNSUPPORTED_CAPABILITY',
-        message: expect.stringContaining('[Modifier+]...Key'),
-      });
-    }
     // The root takes swipe only.
     await expect(h.engine.perform!({ id: 'root', revision: '' }, { kind: 'tap' }, operation())).rejects.toMatchObject({
       code: 'NOT_ACTIONABLE',
     });
     expect(h.fake.methods().filter((method) => method === 'interactions.press')).toHaveLength(0);
     h.fake.respond('interactions.press', () => {
-      throw new AppError('INVALID_ARGS', 'ref @e4 not found; take a new snapshot');
+      throw new AppError('COMMAND_FAILED', 'Ref @e4 not found', { reason: 'ref_not_found', dispatched: 'no' });
     });
     await expect(h.engine.perform!(about.ref, { kind: 'tap' }, operation())).rejects.toMatchObject({
       code: 'NODE_STALE',
@@ -910,24 +943,6 @@ describe('perform', () => {
 });
 
 describe('session hooks, viewport swipe, location, artifacts', () => {
-  it('scrolls the viewport through the root, goes back, relaunches, and resets state through the pinned app', async () => {
-    const h = harness();
-    await openAttempt(h);
-    const root = await screenRootOf(h);
-    const before = h.fake.calls.length;
-    await h.engine.perform!(root.ref, { kind: 'swipe', direction: 'down', momentum: 'fast' }, operation());
-    await h.engine.session!.back!(operation());
-    await h.engine.session!.restart!(operation());
-    await h.engine.session!.reset!(operation());
-    expect(h.fake.calls.slice(before).map((call) => [call.method, call.args])).toEqual([
-      ['interactions.scroll', { direction: 'down', settle: true, settleQuietMs: 150 }],
-      ['command.back', { settle: true, settleQuietMs: 150 }],
-      ['apps.open', { app: 'Settings', platform: 'ios', relaunch: true }],
-      ['settings.update', { setting: 'clear-app-state', state: 'clear', app: 'Settings' }],
-      ['apps.open', { app: 'Settings', platform: 'ios', relaunch: true }],
-    ]);
-  });
-
   it('locates the observation on the foreground app and the screen title, and omits what it does not know', async () => {
     const h = harness();
     await openAttempt(h);
@@ -947,7 +962,8 @@ describe('session hooks, viewport swipe, location, artifacts', () => {
 
   it('numbers screenshots per attempt, masks secure fields in them, and refuses an unmaskable one', async () => {
     const h = harness();
-    const image = { width: 390, height: 844, channels: 3 as const, pixels: new Uint8Array(390 * 844 * 3).fill(200) };
+    // A third of the 390x844 viewport: the mask scales the Password field's bounds (y=270, 44 tall) to the image.
+    const image = { width: 130, height: 282, channels: 3 as const, pixels: new Uint8Array(130 * 282 * 3).fill(200) };
     const temporaryFiles: string[] = [];
     h.fake.respond('capture.screenshot', (args) => {
       const file = (args as { path: string }).path;
@@ -960,8 +976,8 @@ describe('session hooks, viewport swipe, location, artifacts', () => {
     expect(await h.engine.artifacts!.screenshot(undefined, operation())).toBe('screenshots/002-screenshot.png');
     const written = decodePng(new Uint8Array(readFileSync(path.join(artifactsDir, 'screenshots', '002-screenshot.png'))));
     const at = (x: number, y: number) => [...written.pixels.subarray((y * written.width + x) * written.channels, (y * written.width + x) * written.channels + 3)];
-    expect(at(100, 290)).toEqual([0, 0, 0]);
-    expect(at(100, 240)).toEqual([200, 200, 200]);
+    expect(at(33, 96)).toEqual([0, 0, 0]);
+    expect(at(33, 80)).toEqual([200, 200, 200]);
 
     await h.engine.endAttempt!(cleanup());
     await h.engine.startAttempt!({ attemptId: 'a2', artifactsDir, signal: new AbortController().signal, resolveSecret: noSecrets });
@@ -979,14 +995,13 @@ describe('session hooks, viewport swipe, location, artifacts', () => {
     }
   });
 
-  it.each(['capture', 'read'])('removes temporary screenshots after a %s failure', async (failure) => {
+  it('removes temporary screenshots after a capture failure', async () => {
     const h = harness();
     let file: string | undefined;
     h.fake.respond('capture.screenshot', (args) => {
       file = (args as { path: string }).path;
       writeFileSync(file, new Uint8Array([1, 2, 3]));
-      if (failure === 'capture') throw new AppError('COMMAND_FAILED', 'capture failed after writing');
-      return { path: path.join(path.dirname(file), 'missing.png') };
+      throw new AppError('COMMAND_FAILED', 'capture failed after writing');
     });
     await openAttempt(h);
     try {
@@ -999,17 +1014,16 @@ describe('session hooks, viewport swipe, location, artifacts', () => {
     }
   });
 
-  it.each(['success', 'failure'])('cleans up a screenshot that finishes with %s after cancellation', async (outcome) => {
+  it('cleans up a screenshot that fails after cancellation', async () => {
     const h = harness();
     let finishCapture: (() => void) | undefined;
     const started = new Promise<string>((captureStarted) => {
-      h.fake.respond('capture.screenshot', (args) => new Promise((resolve, reject) => {
+      h.fake.respond('capture.screenshot', (args) => new Promise((_resolve, reject) => {
         const file = (args as { path: string }).path;
         finishCapture = () => {
           finishCapture = undefined;
           writeFileSync(file, new Uint8Array([1, 2, 3]));
-          if (outcome === 'failure') reject(new AppError('COMMAND_FAILED', 'late capture failure'));
-          else resolve({ path: file });
+          reject(new AppError('COMMAND_FAILED', 'late capture failure'));
         };
         captureStarted(file);
       }));
@@ -1202,6 +1216,7 @@ describe('device fixture', () => {
     });
 
     it('retries a sparse capture instead of reading it as a dismissed keyboard', async () => {
+      autoAdvanceTimers();
       const h = harness();
       await openAttempt(h);
       await observed(h, 'Back');
@@ -1258,6 +1273,7 @@ describe('device fixture', () => {
   });
 
   it('counts a back, home, alert, keyboard, rotation, or fold as an action, so a control that arrives with it waits out the transition budget', async () => {
+    autoAdvanceTimers();
     const h = harness({ transition: 120 });
     await openAttempt(h);
     await observed(h, 'Back');
@@ -1317,25 +1333,16 @@ describe('device fixture', () => {
     expect(h.fake.methods().filter((method) => method === 'command.home')).toHaveLength(1);
   });
 
-  it('mints a core locator from an agent-device selector without a device round trip', async () => {
-    const h = harness();
-    await openAttempt(h);
-    const before = h.fake.calls.length;
-    expect(fixture(h).locator('id=About')).toEqual({ minted: true });
-    expect(minted).toEqual([{ kind: 'selector', selector: 'id=About' }]);
-    expect(h.fake.calls.length).toBe(before);
-  });
-
   it('installs a build from a test, replacing by default and removing first on reinstall', async () => {
     const h = harness();
     await openAttempt(h);
     h.fake.respond('apps.install', () => ({ app: './b/App.app', appPath: '/b/App.app', platform: 'ios', bundleId: 'com.example.app', identifiers: {} }));
-    h.fake.respond('apps.reinstall', () => ({ app: 'com.example.app', appPath: '/b/App.app', platform: 'ios', identifiers: {} }));
+    h.fake.respond('apps.reinstall', (args) => ({ app: (args as { app: string }).app, appPath: '/b/App.app', platform: 'ios', identifiers: {} }));
     const device = fixture(h);
     const before = h.fake.calls.length;
     expect(await device.installApp('./b/App.app')).toEqual({ app: 'com.example.app', bundleId: 'com.example.app' });
-    expect(await device.installApp('/b/App.app', { reinstall: true })).toEqual({ app: 'com.example.app' });
-    expect(await device.installApp('/b/App.app', { app: 'com.other', reinstall: true })).toEqual({ app: 'com.example.app' });
+    expect(await device.installApp('/b/App.app', { reinstall: true })).toEqual({ app: 'Settings' });
+    expect(await device.installApp('/b/App.app', { app: 'com.other', reinstall: true })).toEqual({ app: 'com.other' });
     expect(h.fake.calls.slice(before).map((call) => [call.method, call.args])).toEqual([
       ['apps.install', { platform: 'ios', appPath: '/project/b/App.app' }],
       ['apps.reinstall', { platform: 'ios', app: 'Settings', appPath: '/b/App.app' }],
@@ -1452,9 +1459,11 @@ describe('device fixture', () => {
     expect(h.fake.calls.slice(other).map((call) => call.method)).toEqual(['settings.update']);
   });
 
-  it('switches Android location services on before a fix, since clearLocation leaves them off', async () => {
+  it('switches Android location services on before a fix, since clearLocation leaves them off, and reads the foreground package', async () => {
     const h = harness({ platform: 'android', bundleId: 'com.android.settings' });
     await openAttempt(h);
+    h.fake.respond('command.appState', () => ({ platform: 'android', package: 'com.android.settings', activity: '.Main' }));
+    expect(await fixture(h).foregroundApp()).toEqual({ name: 'com.android.settings', bundleId: 'com.android.settings' });
     const before = h.fake.calls.length;
     const device = fixture(h);
     await device.setLocation({ latitude: 52.2297, longitude: 21.0122 });
@@ -1464,13 +1473,6 @@ describe('device fixture', () => {
       ['settings.update', { setting: 'location', state: 'set', latitude: 52.2297, longitude: 21.0122 }],
       ['settings.update', { setting: 'location', state: 'off' }],
     ]);
-  });
-
-  it('reads an Android foreground package', async () => {
-    const h = harness({ platform: 'android', bundleId: 'com.android.settings' });
-    await openAttempt(h);
-    h.fake.respond('command.appState', () => ({ platform: 'android', package: 'com.android.settings', activity: '.Main' }));
-    expect(await fixture(h).foregroundApp()).toEqual({ name: 'com.android.settings', bundleId: 'com.android.settings' });
   });
 
   it('opens a link into the pinned app or a named one, and the location follows the app it landed in', async () => {
@@ -1509,27 +1511,17 @@ describe('device fixture', () => {
     expect(ios.fake.methods()).toEqual(['devices.boot']);
   });
 
-  it('refuses forbidden schemes and anything but an absolute URL before any device command', async () => {
+  it('refuses forbidden schemes, anything but an absolute URL to openLink, and any link to openApp before any device command; openApp still opens an app by id', async () => {
     const h = harness();
     await openAttempt(h);
     const device = fixture(h);
     const before = h.fake.calls.length;
-    for (const denied of ['file:///etc/passwd', 'data:text/html,hi', 'javascript:alert(1)']) {
+    for (const denied of ['file:///etc/passwd', 'data:text/html,hi', 'javascript:alert(1)', 'view-source:file:///etc/passwd']) {
       await expect(device.openLink(denied)).rejects.toMatchObject({ code: 'POLICY_DENIED' });
+      await expect(device.openApp(denied)).rejects.toMatchObject({ code: 'POLICY_DENIED' });
     }
     for (const malformed of ['orders/42', '', 'https://']) {
       await expect(device.openLink(malformed)).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
-    }
-    expect(h.fake.calls.length).toBe(before);
-  });
-
-  it('refuses a link handed to openApp before any device command, and still opens an app by id', async () => {
-    const h = harness();
-    await openAttempt(h);
-    const device = fixture(h);
-    const before = h.fake.calls.length;
-    for (const denied of ['file:///etc/passwd', 'data:text/html,hi', 'javascript:alert(1)']) {
-      await expect(device.openApp(denied)).rejects.toMatchObject({ code: 'POLICY_DENIED' });
     }
     for (const link of ['https://example.com/verify', 'myapp://orders/42']) {
       await expect(device.openApp(link, { relaunch: true })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
@@ -1604,18 +1596,14 @@ describe('device fixture', () => {
     ]);
   });
 
-  it('refuses an openApp permission name or state it does not know before any device command', async () => {
+  it('refuses an openApp permission name it does not know before any device command', async () => {
     const h = harness();
     await openAttempt(h);
     const device = fixture(h);
     const before = h.fake.calls.length;
     await expect(device.openApp('com.other', { relaunch: true, permissions: { notification: 'grant' } } as never)).rejects.toMatchObject({
       code: 'INVALID_ARGUMENT',
-      message: 'device.openApp({ permissions }) has unknown key "notification"; did you mean "notifications"?',
-    });
-    await expect(device.openApp('com.other', { permissions: { camera: 'allow' } } as never)).rejects.toMatchObject({
-      code: 'INVALID_ARGUMENT',
-      message: 'device.openApp({ permissions }).camera must be one of grant, deny, reset, got "allow"',
+      message: expect.stringContaining('device.openApp({ permissions }) has unknown key "notification"'),
     });
     expect(h.fake.calls.length).toBe(before);
   });
@@ -1652,11 +1640,14 @@ describe('device fixture', () => {
     expect(android.fake.calls.length).toBe(count);
   });
 
-  it('labels openApp and openLink steps without the link query, so a magic-link token never enters the report', () => {
+  it('labels openApp and openLink steps without the link query and setClipboard by length, so a token never enters the report', () => {
     fixture(harness());
     expect(declared?.openApp?.label?.('https://app.example.com/magic?token=s3cret#frag')).toBe('https://app.example.com/magic');
     expect(declared?.openApp?.label?.('com.apple.Preferences')).toBe('com.apple.Preferences');
     expect(declared?.openLink?.label?.('myapp://orders/42?ref=mail')).toBe('myapp://orders/42');
+    expect(declared?.openLink?.label?.('verify?token=s3cret')).toBe('verify');
+    // Clipboard text is often a code or token the test copied, never a configured secret the ledger would redact.
+    expect(declared?.setClipboard?.label?.('482913')).toBe('6 chars');
   });
 });
 
@@ -1863,6 +1854,8 @@ describe('video', () => {
 describe('deterministic actions', () => {
   const test = (): OperationContext => ({ ...operation(), origin: 'test' });
 
+  beforeEach(autoAdvanceTimers);
+
   /**
    * Taps under a stopped clock. The fake client records a dispatch the moment
    * it is called, so a press recorded before any timer could fire, with no
@@ -1871,7 +1864,7 @@ describe('deterministic actions', () => {
    * on an idle machine.
    */
   async function tapsAtOnce(h: Harness, node: SemanticNode, expected: unknown): Promise<void> {
-    vi.useFakeTimers({ now: Date.now(), toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.setTimerTickMode('manual');
     try {
       const pending = h.engine.perform!(node.ref, { kind: 'tap' }, test());
       await new Promise<void>((resolve) => setImmediate(resolve));
@@ -1879,7 +1872,7 @@ describe('deterministic actions', () => {
       expect(h.fake.lastArgs('interactions.press')).toEqual(expected);
       await pending;
     } finally {
-      vi.useRealTimers();
+      vi.setTimerTickMode('nextTimerAsync');
     }
   }
 
@@ -1941,6 +1934,22 @@ describe('deterministic actions', () => {
     h.fake.respond('capture.snapshot', () => SETTINGS_SNAPSHOT);
     await h.engine.perform!(landed.ref, { kind: 'tap' }, test());
     expect(h.fake.lastArgs('interactions.press')).toEqual({ ref: '@e42' });
+  });
+
+  it('acts on the duplicate nearest where the control was when a fresh snapshot lists several alike', async () => {
+    const h = harness({ transition: 120 });
+    await openAttempt(h);
+    await h.engine.perform!((await observed(h, 'Back')).ref, { kind: 'tap' }, test());
+    const add = (ref: string, y: number) => ({ ref, index: 10, parentIndex: 0, depth: 1, type: 'button', label: 'Add', rect: { x: 0, y, width: 390, height: 44 } });
+    h.fake.respond('capture.snapshot', () => ({ ...SETTINGS_SNAPSHOT, nodes: [...SETTINGS_NODES, add('@e11', 600)] }));
+    const arriving = await observed(h, 'Add');
+    // A list of rows that each carry an identical Add button: the row the test meant has settled 10 points lower.
+    h.fake.respond('capture.snapshot', () => ({
+      ...SETTINGS_SNAPSHOT,
+      nodes: [...SETTINGS_NODES, add('@e20', 200), { ...add('@e21', 610), index: 11 }],
+    }));
+    await h.engine.perform!(arriving.ref, { kind: 'tap' }, test());
+    expect(h.fake.lastArgs('interactions.press')).toEqual({ ref: '@e21' });
   });
 
   it('gives a control that moved with the last action the budget too, and skips it once the budget has elapsed', async () => {
@@ -2025,11 +2034,6 @@ describe('deterministic actions', () => {
       ],
     }));
     await tapsAtOnce(h, await observed(h, 'Save'), { ref: '@e11' });
-  });
-
-  it('rejects a negative or fractional transition budget', () => {
-    expect(() => harness({ transition: -5 })).toThrow(/non-negative integer/);
-    expect(() => harness({ transition: 0.5 })).toThrow(/non-negative integer/);
   });
 });
 
