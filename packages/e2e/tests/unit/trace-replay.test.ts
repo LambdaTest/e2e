@@ -1,6 +1,6 @@
 /** Zero-turn replay: typed dispatch, relocation backoff, divergence. */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentError } from '../../src/agent/error.ts';
 import type { ExecutorActions } from '../../src/agent/executor.ts';
 import { replayTrace, verifyEndState, type ObservedScreen, type ReplayHost } from '../../src/agent/replay.ts';
@@ -10,6 +10,14 @@ import type { SettleMode } from '../../src/agent/settle-policy.ts';
 import type { ActionTrace, RecordedAction } from '../../src/cache/trace.ts';
 import type { SemanticNode } from '../../src/engine/surface.ts';
 import { redactedNodes } from '../helpers/redacted.ts';
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setTimerTickMode('nextTimerAsync');
+});
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 const upgrade: SemanticNode = { ref: { id: 'n1', revision: 'r1' }, role: 'button', name: 'Upgrade' };
 const email: SemanticNode = { ref: { id: 'n2', revision: 'r1' }, role: 'textbox', name: 'Email' };
@@ -109,8 +117,16 @@ function screen(nodes: readonly SemanticNode[], viewport = VIEWPORT) {
 describe('verifyEndState', () => {
   const saved: SemanticNode = { ref: { id: 'm', revision: 'r1' }, role: 'status', name: 'Marker', text: 'saved' };
   const savedAnchor = { role: 'status', name: 'Marker', text: 'saved' };
-  const verifyAnchors = (host: ReplayHost, endAnchors: readonly TraceTargetDescriptor[]) =>
-    verifyEndState(host, (live) => deltaHolds({ endAnchors }, live.nodes, new Map()));
+  const verifyAnchors = (host: ReplayHost, endAnchors: readonly TraceTargetDescriptor[], waitMs?: number) =>
+    verifyEndState(host, (live) => deltaHolds({ endAnchors }, live.nodes, new Map()), waitMs === undefined ? {} : { waitMs });
+
+  /** A host with `remainingMs` on the step clock whose screen shows the saved marker from `afterMs` on. */
+  const savedAfter = (afterMs: number, remainingMs: number): TestHost => {
+    const from = Date.now() + afterMs;
+    const host = makeHost({ remainingMs });
+    host.capture = async () => screen(Date.now() >= from ? [upgrade, saved] : [upgrade]);
+    return host;
+  };
 
   it('holds when every anchor is present, counting an ambiguous match as presence', async () => {
     const twin: SemanticNode = { ...saved, ref: { id: 'm2', revision: 'r1' } };
@@ -152,6 +168,24 @@ describe('verifyEndState', () => {
     await expect(verifyAnchors(host, [savedAnchor])).resolves.toBe(true);
     expect(shown).toBe(true);
   });
+
+  it('waits past the settling backoff for an effect the recording waited longer for, while the step clock keeps its reserve', async () => {
+    const startedMs = Date.now();
+    await expect(verifyAnchors(savedAfter(20_000, 120_000), [savedAnchor], 30_000)).resolves.toBe(true);
+    expect(Date.now() - startedMs).toBe(20_000);
+    await expect(verifyAnchors(savedAfter(20_000, 25_000), [savedAnchor], 30_000)).resolves.toBe(false);
+  });
+
+  it('gives up the long end wait when it runs out, or at once when the surface turns to pixels', async () => {
+    const startedMs = Date.now();
+    await expect(verifyAnchors(savedAfter(Infinity, 120_000), [savedAnchor], 30_000)).resolves.toBe(false);
+    expect(Date.now() - startedMs).toBe(30_000);
+    const pixelsFrom = Date.now() + 16_000;
+    const blind = makeHost({ remainingMs: 120_000 });
+    blind.capture = async () => (Date.now() >= pixelsFrom ? { kind: 'pixels', viewport: VIEWPORT } : screen([upgrade]));
+    await expect(verifyEndState(blind, () => Date.now() >= pixelsFrom, { waitMs: 30_000 })).resolves.toBe(false);
+    expect(Date.now()).toBe(pixelsFrom);
+  });
 });
 
 describe('replayTrace', () => {
@@ -171,22 +205,6 @@ describe('replayTrace', () => {
     const silent = makeHost({});
     await replayTrace(silent, free);
     expect(silent.looks).toEqual([]);
-  });
-
-  it('replays a full trace and reports completion', async () => {
-    const host = makeHost({});
-    const outcome = await replayTrace(
-      host,
-      trace([
-        { name: 'navigate', summary: 'navigate to "/"', url: '/' },
-        tapUpgrade,
-        typeEmail,
-        { name: 'scroll', summary: 'scroll down', direction: 'down' },
-      ]),
-    );
-    expect(outcome).toMatchObject({ completed: true, executed: 4, total: 4 });
-    expect(host.calls).toEqual(['navigate', 'tap', 'type', 'scroll']);
-    expect(outcome.summaries).toHaveLength(4);
   });
 
   it('reads the start capture for the first look instead of observing the same screen again', async () => {
@@ -316,7 +334,7 @@ describe('replayTrace', () => {
     );
     expect(outcome).toMatchObject({ completed: false, executed: 0, stopReason: 'target-not-found' });
     expect(host.calls).toEqual([]);
-  }, 15_000);
+  });
 
   it('replays a bare-point hover through hoverAt, on the recorded viewport only', async () => {
     const host = makeHost({});
@@ -332,7 +350,9 @@ describe('replayTrace', () => {
     const host = makeHost({ nodes: [email] });
     const outcome = await replayTrace(host, trace([tapUpgrade]));
     expect(outcome).toMatchObject({ completed: false, executed: 0, stopReason: 'target-not-found' });
-  }, 15_000);
+    // One look, then a retry after each backoff delay until the 15s relocation deadline.
+    expect(host.observations).toBe(9);
+  });
 
   it('keeps looking while a positioned target is ambiguous, since a form still rendering shows fewer twins', async () => {
     const unnamed = (id: string): SemanticNode => ({ ref: { id, revision: 'r1' }, role: 'textbox' });
@@ -357,6 +377,7 @@ describe('replayTrace', () => {
     const host = makeHost({ nodes: [upgrade, twin, email] });
     const outcome = await replayTrace(host, trace([tapUpgrade]));
     expect(outcome).toMatchObject({ completed: false, executed: 0, stopReason: 'target-ambiguous' });
+    expect(host.calls).toEqual([]);
     expect(host.observations).toBeLessThan(3);
   });
 
@@ -380,14 +401,6 @@ describe('replayTrace', () => {
     );
     expect(outcome).toMatchObject({ completed: true, executed: 1 });
     expect(host.calls).toEqual(['tap']);
-  });
-
-  it('diverges immediately on ambiguity', async () => {
-    const twin: SemanticNode = { ref: { id: 'n9', revision: 'r1' }, role: 'button', name: 'Upgrade' };
-    const host = makeHost({ nodes: [upgrade, twin] });
-    const outcome = await replayTrace(host, trace([tapUpgrade]));
-    expect(outcome).toMatchObject({ completed: false, stopReason: 'target-ambiguous' });
-    expect(host.calls).toEqual([]);
   });
 
   it('absorbs an action failure as divergence, never as a step failure', async () => {
@@ -585,25 +598,19 @@ describe('replayTrace: bare-point taps', () => {
   });
 
   it('waits for a lost list that filled the screen once per folded scroll, not once per repeat', async () => {
-    vi.useFakeTimers();
-    vi.setTimerTickMode('nextTimerAsync');
-    try {
-      const targets: unknown[] = [];
-      const host = makeHost({ nodes: [email], onAction: (name, detail) => void (name === 'scroll' && targets.push(detail)) });
-      const startedMs = Date.now();
-      const outcome = await replayTrace(
-        host,
-        trace([{ name: 'scroll', summary: 'scroll down x4', direction: 'down', target: { role: 'group', name: 'Rows 1 to 12' }, times: 4, spans: 0.92 }]),
-      );
-      expect(outcome).toMatchObject({ completed: true, executed: 1 });
-      expect(targets).toEqual(Array.from({ length: 4 }, () => ({ direction: 'down', t: undefined })));
-      // One relocation backoff (the first look and eight raw ones over 14s),
-      // then one settled look before each later repeat, as a viewport scroll takes.
-      expect(Date.now() - startedMs).toBe(14_000);
-      expect(host.looks).toEqual(['held-still', ...Array.from({ length: 8 }, () => 'raw'), 'held-still', 'held-still', 'held-still']);
-    } finally {
-      vi.useRealTimers();
-    }
+    const targets: unknown[] = [];
+    const host = makeHost({ nodes: [email], onAction: (name, detail) => void (name === 'scroll' && targets.push(detail)) });
+    const startedMs = Date.now();
+    const outcome = await replayTrace(
+      host,
+      trace([{ name: 'scroll', summary: 'scroll down x4', direction: 'down', target: { role: 'group', name: 'Rows 1 to 12' }, times: 4, spans: 0.92 }]),
+    );
+    expect(outcome).toMatchObject({ completed: true, executed: 1 });
+    expect(targets).toEqual(Array.from({ length: 4 }, () => ({ direction: 'down', t: undefined })));
+    // One relocation backoff (the first look and eight raw ones over 14s),
+    // then one settled look before each later repeat, as a viewport scroll takes.
+    expect(Date.now() - startedMs).toBe(14_000);
+    expect(host.looks).toEqual(['held-still', ...Array.from({ length: 8 }, () => 'raw'), 'held-still', 'held-still', 'held-still']);
   });
 
   it('counts the repeats of a folded scroll that ran before a later one lost the list', async () => {

@@ -3,7 +3,7 @@
 import type { ResolvedConfig } from '../config/resolve.ts';
 import { MIN_SECRET_LENGTH, secretLength } from '../config/secrets.ts';
 import type { TargetSession } from '../engine/surface.ts';
-import { ConfigurationError } from '../internal/errors.ts';
+import { ConfigurationError, setErrorRedactor } from '../internal/errors.ts';
 import { SecretLedger } from '../internal/redact.ts';
 import { unavailableCode } from '../secrets.ts';
 import type { Secret } from '../types.ts';
@@ -93,8 +93,9 @@ export function staticSecretLedger(secrets: ResolvedConfig['allSecrets']): Pick<
   return ledger;
 }
 
-/** Seeds `processSecrets` with the static values of `secrets`, so output before any session opens is covered too. */
+/** Seeds `processSecrets` with the static values of `secrets` and makes it `serializeError`'s default redactor, so output before any session opens is covered too. */
 export function registerStaticSecrets(secrets: ResolvedConfig['allSecrets']): void {
+  setErrorRedactor(processSecrets.redact);
   for (const [name, { value }] of secrets) {
     if (typeof value === 'string') processSecrets.register(name, value);
   }

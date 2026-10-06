@@ -59,7 +59,7 @@ body {
     box-shadow: 0 8px currentColor, 3px 4px currentColor, 3px 12px currentColor, 6px 0 currentColor, 6px 8px currentColor;
     opacity: 0;
     pointer-events: none;
-    animation: e2e-stars-shimmer 120s steps(12, end) 120s infinite;
+    animation: e2e-stars-shimmer 45s steps(12, end) 45s infinite;
     @media (prefers-reduced-motion: reduce), (forced-colors: active) {
       animation: none;
     }
@@ -71,14 +71,14 @@ body {
     left: -8px;
     opacity: 0;
   }
-  0.16% {
+  0.43% {
     opacity: 0.8;
   }
-  0.64% {
+  1.71% {
     left: 100%;
     opacity: 0.8;
   }
-  0.8%, 100% {
+  2.13%, 100% {
     left: 100%;
     opacity: 0;
   }
@@ -263,6 +263,61 @@ html.dark body .code-block-fade-overlay {
   background-image: linear-gradient(to right, transparent, var(--e2e-surface) 50%) !important;
 }
 
+/* A long code block carries `expandable` and reads like the setup prompt on the
+   Quickstart page: a few lines fading out over a centered "Show more" that
+   turns into "Show less". Mintlify renders the toggle as a footer button with
+   its own text ("See all N lines", "Collapse"); that text is shrunk to nothing
+   and the label is an ::after, which also joins the accessible name, so a
+   voice command for the visible label finds the button. The collapsed state is
+   Mintlify's `overflow-y-hidden!` class on the code viewport: it follows the
+   toggle alone and is already in the server-rendered HTML, unlike base-ui's
+   overflow attributes, which follow the scroll position and appear only after
+   hydration. A Mintlify upgrade can rename it; the blocks then fall back to
+   Mintlify's own footer. */
+#content .code-block:has(> [data-component-part='code-block-footer']) {
+  & [data-component-part='code-block-root']:has(> .overflow-y-hidden\!) {
+    mask-image: linear-gradient(to bottom, black 45%, transparent);
+  }
+
+  & [data-component-part='code-block-footer'] {
+    justify-content: center;
+    padding: 0;
+  }
+
+  & [data-component-part='code-block-footer-button'] {
+    flex: 1;
+    justify-content: center;
+    padding: 0.5rem 1rem 0.75rem;
+    color: var(--e2e-muted);
+    font-size: 0;
+    cursor: pointer;
+
+    & > svg {
+      display: none;
+    }
+
+    &::after {
+      content: 'Show less';
+      font-size: 0.8125rem;
+      font-weight: 400;
+    }
+
+    &:hover {
+      color: var(--e2e-ink);
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--e2e-ink) !important;
+      outline-offset: -2px;
+    }
+  }
+
+  &:has([data-component-part='code-block-root'] > .overflow-y-hidden\!)
+    [data-component-part='code-block-footer-button']::after {
+    content: 'Show more';
+  }
+}
+
 /* Callouts are a hairline box in the foreground color; the icon tells a note
    from a warning, not a hue. */
 #content .callout {
@@ -389,7 +444,7 @@ html.dark body .code-block-fade-overlay {
   outline-offset: 3px;
 }
 
-/* The provider walkthrough on the Models page: separate boxes sharing one
+/* The provider walkthrough on the Models and Quickstart pages: separate boxes sharing one
    selection (snippets/model-provider.jsx). */
 #content .provider-part {
   margin-block: 1.25rem;
@@ -664,4 +719,37 @@ html.dark body .code-block-fade-overlay {
    square and reads on both. */
 .dark img[src*='/images/integrations/expo.svg'] {
   filter: invert(1);
+}
+
+/* The Next.js wordmark needs the same contrast in dark mode. */
+.dark img[src*='/images/examples/nextjs.svg'] {
+  filter: invert(1);
+}
+
+/* Keep the wide Next.js wordmark legible alongside the square marks. */
+#content [data-component-part='card-icon']:has(> img[src*='/images/examples/nextjs.svg']),
+#content img[src*='/images/examples/nextjs.svg'] {
+  width: 80px;
+}
+
+/* Sidebar page icons from a file (in #sidebar-content, or #mobile-nav below
+   the desktop breakpoint) load as <img> in their own colors, while the
+   Font Awesome ones are a mask filled with --gray-400 (--gray-500 in dark
+   mode, the primary color on the current page). The marks under
+   /images/icons/ are drawn in black, so brightness(0) makes them a
+   silhouette and invert() lifts it to that same grey. */
+:is(#sidebar-content, #mobile-nav) img[src*='/images/icons/'] {
+  filter: brightness(0) invert(0.624);
+}
+
+.dark :is(#sidebar-content, #mobile-nav) img[src*='/images/icons/'] {
+  filter: brightness(0) invert(0.439);
+}
+
+:is(#sidebar-content, #mobile-nav) [data-active='true'] img[src*='/images/icons/'] {
+  filter: brightness(0) invert(0.09);
+}
+
+.dark :is(#sidebar-content, #mobile-nav) [data-active='true'] img[src*='/images/icons/'] {
+  filter: brightness(0) invert(0.98);
 }

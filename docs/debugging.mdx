@@ -1,6 +1,7 @@
 ---
 title: Debugging a run
 description: Read the report, open the evidence, watch the browser, and see what the model was sent.
+icon: "magnifying-glass"
 ---
 
 Start with the failure in the terminal. Every run also writes
@@ -198,9 +199,16 @@ stdout | web tests/todos.e2e.ts > adds a todo
 hello from the test
 ```
 
-Nothing is buffered or dropped: every line appears when it is written, in a
-pipe or a CI log as much as in a terminal. The output is not part of the
-report; use `expect` or an artifact for anything a later reader needs.
+Output from outside a test, such as a test file's top level or a reporter,
+prints under `stdout | runner` or `stderr | runner`. Both streams print on
+stdout, in a pipe or a CI log too. Without the `list` reporter, output
+goes to its own stream as written.
+
+Secret values are [redacted](/security#redaction). Output printed while the
+config loads appears once it has loaded, before the run header, and is
+dropped for a warning if the load fails. Every other line appears when it
+is written. The output is not part of the report; use `expect` or an
+artifact for anything a later reader needs.
 
 ## Agent steps
 
@@ -266,13 +274,13 @@ large raw JSON file.
 
 Replayed steps make no model call and leave no AI trace. Add `--no-cache`
 when you need to inspect the whole flow or rule out a stale recording. See
-[Caching agent steps](/cache).
+[Caching](/cache).
 
 ## Common errors
 
 | Code | Usual cause | Fix |
 | --- | --- | --- |
-| `APP_UNREACHABLE` | Nothing answers at `app.url`, or `app.command` never became ready; on a device, the message may name the iOS automation runner instead (busy, wedged, or a snapshot it could not present) | Set `app.command.log` and read it; check the port; raise `app.command.startupTimeout`. For the runner, follow the recovery in the message: `npx agent-device daemon stop`, reboot the simulator (see [Testing iOS and Android](/mobile#troubleshooting)) |
+| `APP_UNREACHABLE` | Nothing answers at `app.url`, or `app.command` never became ready; on a device, the message may name the iOS automation runner instead (busy, wedged, or a snapshot it could not present) | Set `app.command.log` and read it; check the port; raise `app.command.startupTimeout`. For the runner, follow the recovery in the message: `npx agent-device daemon stop`, reboot the simulator (see [Mobile](/mobile#troubleshooting)) |
 | `APP_ALREADY_RUNNING` | Something already serves `app.url` when the runner wanted to start `app.command` | Stop it, or set `reuseExisting: true` for local runs |
 | `LOCATOR_NOT_FOUND` | Wrong role or name, text not exact, element inside an iframe, page not open | Read the markup for the accessible name; try `exact: false`; `browser.frameLocator` for iframes; `--headed` to look |
 | `LOCATOR_AMBIGUOUS` | Two matches: a hidden duplicate, a repeated label | Add `{ name }`, scope under a container, `filter`, `first()`, or `{ visible: true }` |

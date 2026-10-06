@@ -7,30 +7,28 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { startFixtureApp, type FixtureApp } from '../helpers/fixture-app.ts';
+import { createFakeEngine } from '../helpers/fake-engine.ts';
+import { engineConfig } from '../helpers/fixture-config.ts';
 import { createProject, runExisting, type FixtureProject } from '../helpers/run-project.ts';
 import type { FinishedRun, Reporter, RunEvent } from '../../src/index.ts';
 
 const SUITE = `import { test, expect } from 'e2e';
 
-test('shows the counter', async ({ app, screen }) => {
+test('shows the submit button', async ({ app, screen }) => {
   await app.open();
-  await expect(screen.getByRole('status')).toHaveText('0');
+  await expect(screen.getByRole('button', { name: 'Submit' })).toBeVisible();
 });
 `;
 
 describe('reporter objects', () => {
-  let app: FixtureApp;
   let project: FixtureProject;
 
-  beforeAll(async () => {
-    app = await startFixtureApp();
+  beforeAll(() => {
     project = createProject({ 'tests/reporters.e2e.ts': SUITE });
   });
 
-  afterAll(async () => {
+  afterAll(() => {
     project?.cleanup();
-    await app?.close();
   });
 
   afterEach(() => {
@@ -51,8 +49,12 @@ describe('reporter objects', () => {
       },
     };
     const outcome = await runExisting(project, {
-      appUrl: app.url,
-      config: { tests: 'tests/**/*.e2e.ts', reporters: [recording], cache: 'off' as const },
+      config: {
+        ...engineConfig(createFakeEngine({ trace: true }).engine),
+        tests: 'tests/**/*.e2e.ts',
+        reporters: [recording],
+        cache: 'off' as const,
+      },
     });
 
     expect(outcome.exitCode).toBe(0);
@@ -116,8 +118,12 @@ describe('reporter objects', () => {
       },
     };
     const outcome = await runExisting(project, {
-      appUrl: app.url,
-      config: { tests: 'tests/**/*.e2e.ts', reporters: [throwing, hanging, malformed, scalar, loud, quiet], cache: 'off' as const },
+      config: {
+        ...engineConfig(createFakeEngine({ trace: true }).engine),
+        tests: 'tests/**/*.e2e.ts',
+        reporters: [throwing, hanging, malformed, scalar, loud, quiet],
+        cache: 'off' as const,
+      },
       runOptions: {
         reporterTimeout: 200,
         onEvent: () => {
@@ -156,8 +162,12 @@ describe('reporter objects', () => {
       },
     };
     const outcome = await runExisting(project, {
-      appUrl: app.url,
-      config: { tests: 'tests/**/*.e2e.ts', reporters: [uploading], cache: 'off' as const },
+      config: {
+        ...engineConfig(createFakeEngine({ trace: true }).engine),
+        tests: 'tests/**/*.e2e.ts',
+        reporters: [uploading],
+        cache: 'off' as const,
+      },
       runOptions: { reporterTimeout: 30_000, forceSignal: force.signal },
     });
 

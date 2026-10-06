@@ -16,6 +16,7 @@ import { AiTraceRecorder, registerAiTraceRecorder } from '../../internal/ai-trac
 import { DebugTrace } from '../../internal/debug.ts';
 import { classifyError, ConfigurationError, serializeError } from '../../internal/errors.ts';
 import { StreamRedactor } from '../../internal/redact.ts';
+import { ConfigLoadHold } from '../process-output.ts';
 import { processSecrets, registerStaticSecrets, staticSecretLedger } from '../secrecy.ts';
 import { SessionStore } from '../sessions.ts';
 import type {
@@ -36,23 +37,31 @@ import { isAbandonedRejection } from '../../internal/abandoned.ts';
  */
 let outbox: Promise<void> = Promise.resolve();
 
+/** Holds what the process prints while `bootstrap` loads the config, until its secrets are known. */
+const configLoad = new ConfigLoadHold();
+
 /** How long an exit waits for the outbox: a channel whose runner is gone may never acknowledge. */
 const FLUSH_GRACE_MS = 2_000;
 
-/** Queues one message; resolves once the channel has taken it (or is gone). */
+/**
+ * Hands one message to the channel at once; resolves once the channel has
+ * taken it and every message before it (or is gone). The channel keeps the
+ * order. Waiting for the previous message's ack would take an event-loop
+ * turn: a `pair-start` sent right before a body that exits the process, or an
+ * `attempt-deadline` sent right before one that blocks the loop, would never
+ * leave.
+ */
 function send(message: WorkerToMain): Promise<void> {
-  outbox = outbox.then(
-    () =>
-      new Promise<void>((resolve) => {
-        try {
-          if (process.send === undefined || !process.connected) resolve();
-          else process.send(message, undefined, undefined, () => resolve());
-        } catch {
-          // channel already closed; nothing left to deliver
-          resolve();
-        }
-      }),
-  );
+  const taken = new Promise<void>((resolve) => {
+    try {
+      if (process.send === undefined || !process.connected) resolve();
+      else process.send(message, undefined, undefined, () => resolve());
+    } catch {
+      // channel already closed; nothing left to deliver
+      resolve();
+    }
+  });
+  outbox = outbox.then(() => taken);
   return outbox;
 }
 
@@ -97,6 +106,10 @@ function captureOutput(pairInFlight: () => OutputMessage['pair']): () => void {
     flushes.push(() => void output(redactor.flush(), heldFor));
     const write = (chunk: string | Uint8Array, encoding?: BufferEncoding | Done, callback?: Done): boolean => {
       const done = typeof encoding === 'function' ? encoding : callback;
+      if (configLoad.hold(name, chunk)) {
+        if (done !== undefined) process.nextTick(done);
+        return true;
+      }
       const pair = pairInFlight();
       pending += 1;
       void output(redactor.push(chunk), pair).then(() => {
@@ -137,23 +150,32 @@ async function bootstrap(
   // executor that imports the AI SDK itself, and the integration list is
   // process-wide, so calls from either module instance land in one trace.
   if (aiTrace !== undefined) await registerAiTraceRecorder(aiTrace, loadAiSdk);
-  const raw = await loadConfigModule(message.configPath);
-  const config = assignPorts(
-    resolveConfig(raw, { projectRoot: message.projectRoot, configPath: message.configPath, env: process.env, cli: message.cli }),
-    message.ports,
+  // What the config's top-level code prints is held until its secrets are
+  // registered, so it is redacted like a test's output.
+  const { config, target } = await configLoad.during(
+    async () => {
+      const raw = await loadConfigModule(message.configPath);
+      const resolved = assignPorts(
+        resolveConfig(raw, { projectRoot: message.projectRoot, configPath: message.configPath, env: process.env, cli: message.cli }),
+        message.ports,
+      );
+      if (resolved.configDigest !== message.configDigest) {
+        throw new ConfigurationError(
+          'CONFIG_NOT_DETERMINISTIC',
+          'worker resolved a different config digest than the runner; config must be deterministic',
+        );
+      }
+      const named = resolved.targets.find((candidate) => candidate.name === message.targetName);
+      if (named === undefined) {
+        throw new ConfigurationError('UNKNOWN_TARGET', `unknown target "${message.targetName}"`);
+      }
+      setSecretRegistry(resolved);
+      registerStaticSecrets(resolved.allSecrets);
+      return { config: resolved, target: named };
+    },
+    (stream, chunk) => process[stream].write(chunk),
+    (line) => process.stderr.write(`e2e: [warning] ${line}\n`),
   );
-  if (config.configDigest !== message.configDigest) {
-    throw new ConfigurationError(
-      'CONFIG_NOT_DETERMINISTIC',
-      'worker resolved a different config digest than the runner; config must be deterministic',
-    );
-  }
-  const target = config.targets.find((candidate) => candidate.name === message.targetName);
-  if (target === undefined) {
-    throw new ConfigurationError('UNKNOWN_TARGET', `unknown target "${message.targetName}"`);
-  }
-  setSecretRegistry(config);
-  registerStaticSecrets(config.allSecrets);
 
   let collectCounter = 0;
   const resolvePairs = async (unit: RunUnitMessage): Promise<ResolvedUnitPairs> => {

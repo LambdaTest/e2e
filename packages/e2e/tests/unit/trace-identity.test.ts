@@ -98,6 +98,19 @@ describe('traceCacheKeyHash', () => {
     expect(traceCacheKeyHash(buildTraceCacheKey({ ...parts, ...override }))).not.toBe(hash);
   });
 
+  // Every committed .e2e/cache entry is filed under this hash, so a change here misses all of them after an upgrade.
+  // Change it only together with TRACE_SCHEMA_VERSION or the replay policy version.
+  it('hashes a fixed key to the same value across releases', () => {
+    expect(traceCacheKeyHash(buildTraceCacheKey(parts))).toBe('3170638ba32d00d06de1b48eccd2a8fb8268576fa96a4056b84c0911030611f5');
+    const withParams = {
+      ...parts,
+      signature: traceCallSignature('act', 'upgrade to {{plan}}', { plan: 'Pro', seats: 3 }),
+      callIndex: 2,
+      agent: { name: 'buyer', context: undefined },
+    };
+    expect(traceCacheKeyHash(buildTraceCacheKey(withParams))).toBe('6f7f3c0dd423476ec754b8930b845f38244e81656bc1ef159fb0470fb2a81e79');
+  });
+
   it('keys the agent context by digest, never by its text', () => {
     const key = buildTraceCacheKey({ ...parts, agent: { name: 'buyer', context: 'Pay with <secret:card>.' } });
     expect(key.agent).toBe('buyer');

@@ -45,6 +45,22 @@ export function isForcedToolCallSkipped(error: unknown): error is { readonly con
   return record.name === 'AI_ToolChoiceViolationError' && record.finishReason === 'stop';
 }
 
+/**
+ * Whether a turn forced to call `complete_step` called other tools only. The
+ * AI SDK throws `AI_ToolChoiceViolationError` for that too, with the reply's
+ * raw content; it is the model breaking the protocol, as when it names a tool
+ * the turn does not offer, not the provider failing.
+ */
+export function isForcedToolCallMismatched(error: unknown): error is { readonly content: readonly unknown[] } {
+  if (typeof error !== 'object' || error === null) return false;
+  const record = error as { name?: unknown; content?: unknown };
+  return (
+    record.name === 'AI_ToolChoiceViolationError' &&
+    Array.isArray(record.content) &&
+    record.content.some((part: unknown) => typeof part === 'object' && part !== null && 'type' in part && part.type === 'tool-call')
+  );
+}
+
 /** Longest cause chain walked; a wrapped error rarely nests deeper. */
 const MAX_CAUSE_DEPTH = 8;
 

@@ -1,21 +1,12 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { startFixtureApp, type FixtureApp } from '../helpers/fixture-app.ts';
+import { describe, expect, it, vi } from 'vitest';
+import { createFakeEngine } from '../helpers/fake-engine.ts';
+import { engineConfig } from '../helpers/fixture-config.ts';
 import { assertValidReport } from '../helpers/report-schema.ts';
 import { resultByTitle, runProject } from '../helpers/run-project.ts';
 
 describe('test.extend fixtures', () => {
-  let app: FixtureApp;
-
-  beforeAll(async () => {
-    app = await startFixtureApp();
-  });
-
-  afterAll(async () => {
-    await app?.close();
-  });
-
   it(
     'sets fixtures up in order, hands them to hooks and the body, and tears them down last first',
     async () => {
@@ -77,18 +68,21 @@ silent('never calls use', async ({ silent }) => {
   log('unreachable:' + silent);
 });
 
-const clash = base.extend<{ browser: string }>({
-  browser: async (_fixtures, use) => {
-    await use('not the browser');
+const clash = base.extend<{ gadget: string }>({
+  gadget: async (_fixtures, use) => {
+    await use('not the gadget');
   },
 });
-clash('redefines an engine fixture', async ({ browser }) => {
-  log('unreachable:' + String(browser));
+clash('redefines an engine fixture', async ({ gadget }) => {
+  log('unreachable:' + String(gadget));
 });
 `;
       const logPath = path.join('/tmp', `e2e-extend-${Date.now()}.log`);
       process.env['HOOK_LOG'] = logPath;
-      const { outcome, project } = await runProject({ 'tests/extend.e2e.ts': file }, { appUrl: app.url });
+      const { outcome, project } = await runProject(
+        { 'tests/extend.e2e.ts': file },
+        { config: engineConfig(createFakeEngine({ fixtures: true }).engine) },
+      );
       assertValidReport(outcome.report);
 
       const passes = resultByTitle(outcome, 'sees the values');
@@ -115,17 +109,17 @@ clash('redefines an engine fixture', async ({ browser }) => {
       expect(clash.status).toBe('failed');
       expect(clash.attempts[0]!.error?.phase).toBe('beforeEach');
       expect(clash.attempts[0]!.error?.code).toBe('TEST_SETUP_FAILED');
-      expect(clash.attempts[0]!.error?.message).toContain('fixture "browser" is contributed by engine web');
+      expect(clash.attempts[0]!.error?.message).toContain('fixture "gadget" is contributed by engine fake');
 
       expect(readFileSync(logPath, 'utf8').trim().split('\n')).toEqual([
-        'setup:first:web',
+        'setup:first:fake',
         'setup:second:one',
         'beforeEach:one-two',
         'body:one:one-two',
         'afterEach:one',
         'teardown:second',
         'teardown:first',
-        'setup:first:web',
+        'setup:first:fake',
         'setup:second:one',
         'beforeEach:one-two',
         'body:failing:one-two',
@@ -151,19 +145,19 @@ const log = (entry: string) => appendFileSync(process.env.HOOK_LOG!, entry + '\\
 const test = base.extend<{ slow: string }>({
   slow: async (_fixtures, use) => {
     log('setup:slow');
-    await new Promise((resolve) => setTimeout(resolve, 2500));
+    await new Promise((resolve) => setTimeout(resolve, 1000));
     await use('slow');
     log('teardown:slow');
   },
 });
 
-test('times out in setup', { timeout: 1000 }, async ({ slow }) => {
+test('times out in setup', { timeout: 500 }, async ({ slow }) => {
   log('unreachable:' + slow);
 });
 `;
       const logPath = path.join('/tmp', `e2e-extend-late-${Date.now()}.log`);
       process.env['HOOK_LOG'] = logPath;
-      const { outcome, project } = await runProject({ 'tests/late.e2e.ts': file }, { appUrl: app.url });
+      const { outcome, project } = await runProject({ 'tests/late.e2e.ts': file }, {});
       const result = resultByTitle(outcome, 'times out in setup');
       expect(result.status).toBe('timed-out');
       expect(result.attempts[0]!.error?.phase).toBe('beforeEach');

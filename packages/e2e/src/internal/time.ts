@@ -1,6 +1,6 @@
 /** Deadline and cancellation helpers. */
 
-import { E2EError } from './errors.ts';
+import { asEngineError, E2EError } from './errors.ts';
 
 export class Deadline {
   readonly endsAt: number;
@@ -50,6 +50,20 @@ export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 /** Canonical polling cadence for locator and assertion loops. */
 export const POLL_INTERVAL_MS = 100;
 
+/**
+ * Whether `cause` is a read a wait's deadline cut off: an operation timeout
+ * of a read that started with less than one poll tick of the wait left, so
+ * it timed out because the wait did, not because the app stopped answering.
+ * A read that started with more and still timed out hung, and its timeout is
+ * the failure. Reads the engine error a locator failure wraps as well as a
+ * bare one.
+ */
+export function cutOffAtDeadline(cause: unknown, startedWithMs: number): boolean {
+  if (startedWithMs >= POLL_INTERVAL_MS) return false;
+  const engineError = asEngineError(cause) ?? asEngineError(cause instanceof Error ? cause.cause : undefined);
+  return engineError?.code === 'OPERATION_TIMEOUT';
+}
+
 /** How long a negated assertion must hold before it passes. */
 export const NEGATION_GRACE_MS = 1000;
 
@@ -58,12 +72,14 @@ export interface PollConditionOptions {
   readonly signal: AbortSignal;
   readonly negated: boolean;
   /**
-   * Evaluates the positive condition once. Returns undefined when the
-   * condition cannot be evaluated yet: the positive poll keeps waiting and
-   * the negation grace window resets.
+   * Evaluates the positive condition once, every read bounded by
+   * `deadline`: a read on a longer budget outlasts the poll. Returns
+   * undefined when the condition cannot be evaluated yet: the positive poll
+   * keeps waiting and the negation grace window resets.
    */
   evaluate(): Promise<boolean | undefined>;
-  onTimeout(): Error | Promise<Error>;
+  /** Builds the poll's failure; `cause` is the read the deadline cut off, when one did. */
+  onTimeout(cause?: unknown): Error | Promise<Error>;
 }
 
 /**
@@ -75,7 +91,12 @@ export interface PollConditionOptions {
  * a slow read counts toward the window. A budget shorter than the window
  * still has to be satisfiable: the negation then only needs to hold for the
  * whole budget, and passes at the deadline on what it has seen, since a read
- * past the deadline has no budget left.
+ * past the deadline has no budget left. A read the deadline cut off (see
+ * `cutOffAtDeadline`) after an earlier one completed saw nothing: the poll
+ * ends there. A negation then passes if it has held long enough by the
+ * time the read is cut off: the read left less than one poll tick unseen, no
+ * more than the gap between any two reads, so a short budget still passes at
+ * its deadline on what it saw.
  */
 export async function pollCondition(options: PollConditionOptions): Promise<void> {
   const { deadline, negated } = options;
@@ -84,8 +105,18 @@ export async function pollCondition(options: PollConditionOptions): Promise<void
   let readAt = startedAt;
   let holdingSince: number | undefined;
   const holds = (now: number): boolean => holdingSince !== undefined && now - holdingSince >= grace;
+  let sampled = false;
   for (;;) {
-    const value = await options.evaluate();
+    const startedWithMs = deadline.remaining(readAt);
+    let value: boolean | undefined;
+    try {
+      value = await options.evaluate();
+      sampled = true;
+    } catch (cause) {
+      if (!sampled || !cutOffAtDeadline(cause, startedWithMs)) throw cause;
+      if (negated && holds(Math.min(Date.now(), deadline.endsAt))) return;
+      throw await options.onTimeout(cause);
+    }
     if (!negated) {
       if (value === true) return;
     } else {

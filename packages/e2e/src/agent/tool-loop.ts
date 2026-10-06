@@ -12,14 +12,19 @@
  */
 
 import type { StepTurn } from '../run/steps.ts';
-import type { ModelMessage, StepResult, ToolSet } from 'ai';
+import type { AssistantModelMessage, ModelMessage, StepResult, ToolCallPart, ToolSet } from 'ai';
 import { asSdkLanguageModel, loadAiSdk, type AiSdk, type SdkLanguageModel } from './ai-sdk.ts';
 import { MODEL_REQUEST_HEADERS } from '../internal/client-identity.ts';
 import { ConfigurationError, withHint } from '../internal/errors.ts';
 import type { ProviderOptions } from '../types.ts';
 import { failureHint, isAbort, TRANSPORT_RETRIES } from './model/sdk.ts';
 import { isContextOverflow } from './model/overflow.ts';
-import { isForcedToolCallSkipped, isForcedToolChoiceDowngraded, isForcedToolChoiceRejected } from './model/tool-choice.ts';
+import {
+  isForcedToolCallMismatched,
+  isForcedToolCallSkipped,
+  isForcedToolChoiceDowngraded,
+  isForcedToolChoiceRejected,
+} from './model/tool-choice.ts';
 import { withStallGuard } from './model/stall.ts';
 import { providerHints, type ProviderHints, type ProviderModelRef } from './model/provider-hints.ts';
 import { isScreenOutput, toolResultTexts } from './screen-update.ts';
@@ -305,6 +310,12 @@ class LoopRun {
           prompt = shrunk;
           continue;
         }
+        const corrected = this.correctForcedTurn(cause, tracker);
+        if (corrected === 'out-of-turns') break;
+        if (corrected !== undefined) {
+          prompt = corrected;
+          continue;
+        }
         const freed = this.freeToolChoiceRetry(cause, tracker);
         if (freed !== undefined) {
           prompt = freed;
@@ -396,6 +407,52 @@ class LoopRun {
   }
 
   /**
+   * A turn forced to call `complete_step` that called other tools instead:
+   * the SDK throws `ToolChoiceViolationError` before running any of them. It
+   * is handled like a call to a tool the turn does not offer: the turn counts,
+   * each call goes back to the model as an error result, and the model is
+   * asked again on the same turn budget. Out of turns, the step ends as
+   * `STEP_NO_CONCLUSION`, like any step that never concluded.
+   */
+  private correctForcedTurn(cause: unknown, tracker: ModelCallTracker): ModelMessage[] | 'out-of-turns' | undefined {
+    if (this.lastRequest === undefined || this.context.signal.aborted || this.hardStop !== undefined) return undefined;
+    if (!isForcedToolCallMismatched(cause)) return undefined;
+    const reply = thrownReply(cause.content);
+    const results = reply.calls.map((call) => ({
+      type: 'tool-result' as const,
+      toolCallId: call.toolCallId,
+      toolName: call.toolName,
+      output: {
+        type: 'error-text' as const,
+        value: `${call.toolName} did not run: only complete_step is available now. Call complete_step with your verdict.`,
+      },
+    }));
+    this.recordThrownTurn(
+      tracker,
+      reply.calls.map((call) => `${call.toolName}(${truncate(safeJson(call.input), MAX_TURN_CALL_CHARS)})`),
+      [
+        skippedReplyText(cause.content),
+        ...results.map((result) => `[${result.toolName}] error: ${result.output.value}`),
+      ].filter((line) => line !== '').join('\n'),
+    );
+    if (this.turnsUsed >= this.maxTurns) return 'out-of-turns';
+    this.note(`turn ${String(this.turnsUsed)} called other tools in place of complete_step: asking again`);
+    this.turnOffset = this.turnsUsed;
+    return [...this.lastRequest, reply.message, { role: 'tool', content: results }];
+  }
+
+  /**
+   * Counts a turn the provider answered, and billed, before the SDK threw on
+   * it. The SDK reports no usage for such a turn.
+   */
+  private recordThrownTurn(tracker: ModelCallTracker, calls: string[], outcome: string): void {
+    tracker.onStepEnd({ usage: UNREPORTED_USAGE, providerMetadata: undefined, reasoningText: undefined });
+    this.turnsUsed += 1;
+    this.turns.push({ index: this.turnsUsed, calls, outcome, notes: [] });
+    this.attachTranscript();
+  }
+
+  /**
    * A model that refuses a forced tool choice (HTTP 400 naming
    * `tool_choice`) is asked again with `auto` and a tool-calls-only rule in
    * its instructions, on the same turn budget. So is one whose reply had no
@@ -408,10 +465,7 @@ class LoopRun {
     if (this.toolChoice === 'auto' || this.lastRequest === undefined) return undefined;
     if (this.context.signal.aborted || this.hardStop !== undefined) return undefined;
     if (isForcedToolCallSkipped(cause)) {
-      // The provider answered, and billed, before the SDK threw: the turn counts.
-      tracker.onStepEnd({ usage: UNREPORTED_USAGE, providerMetadata: undefined, reasoningText: undefined });
-      this.turnsUsed += 1;
-      this.turns.push({ index: this.turnsUsed, calls: [], outcome: skippedReplyText(cause.content), notes: [] });
+      this.recordThrownTurn(tracker, [], skippedReplyText(cause.content));
       this.note(`turn ${String(this.turnsUsed)} answered without the forced tool call: retrying with auto`);
     } else if (isForcedToolChoiceRejected(cause)) {
       this.note(`the model rejected a forced tool choice before turn ${String(this.turnsUsed + 1)}: retrying with auto`);
@@ -766,6 +820,55 @@ function skippedReplyText(content: readonly unknown[] | undefined): string {
     .join('')
     .trim();
   return text === '' ? '' : `assistant: ${truncate(text, MAX_TURN_TEXT_CHARS)}`;
+}
+
+/** One part of a provider reply as the SDK hands it on a `ToolChoiceViolationError`. */
+interface RawReplyPart {
+  readonly type?: unknown;
+  readonly text?: unknown;
+  readonly toolCallId?: unknown;
+  readonly toolName?: unknown;
+  readonly input?: unknown;
+  readonly providerMetadata?: ToolCallPart['providerOptions'];
+}
+
+/**
+ * A reply the SDK threw on, as the assistant message the SDK's own history
+ * would carry: its text, reasoning, and tool calls, each with the provider's
+ * metadata (reasoning signatures and Gemini's thought signatures ride there),
+ * and the tool calls apart, to answer each with a result.
+ */
+function thrownReply(content: readonly unknown[]): { message: AssistantModelMessage; calls: ToolCallPart[] } {
+  const parts: Exclude<AssistantModelMessage['content'], string> = [];
+  const calls: ToolCallPart[] = [];
+  for (const part of content as readonly RawReplyPart[]) {
+    const metadata = part.providerMetadata === undefined ? {} : { providerOptions: part.providerMetadata };
+    if (part.type === 'text' && typeof part.text === 'string' && part.text !== '') {
+      parts.push({ type: 'text', text: part.text, ...metadata });
+    } else if (part.type === 'reasoning' && typeof part.text === 'string') {
+      parts.push({ type: 'reasoning', text: part.text, ...metadata });
+    } else if (part.type === 'tool-call' && typeof part.toolCallId === 'string' && typeof part.toolName === 'string') {
+      const call: ToolCallPart = {
+        type: 'tool-call',
+        toolCallId: part.toolCallId,
+        toolName: part.toolName,
+        input: typeof part.input === 'string' ? parseToolInput(part.input) : part.input,
+        ...metadata,
+      };
+      parts.push(call);
+      calls.push(call);
+    }
+  }
+  return { message: { role: 'assistant', content: parts }, calls };
+}
+
+/** A raw tool call's input for the history: the parsed JSON, or the text itself when it does not parse. */
+function parseToolInput(input: string): unknown {
+  try {
+    return JSON.parse(input) as unknown;
+  } catch {
+    return input;
+  }
 }
 
 function describeOutput(output: unknown): string {

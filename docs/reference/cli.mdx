@@ -1,6 +1,7 @@
 ---
 title: CLI
 description: Commands, flags, output formats, and exit codes.
+icon: "terminal"
 ---
 
 <CodeGroup>
@@ -281,15 +282,15 @@ See [Coding agents](/coding-agents).
 
 <CodeGroup>
 ```bash npm
-npx e2e mcp [--config <path>] [--target <name>] [--headless] [--max-sessions <n>]
+npx e2e mcp [--config <path>] [--target <name>] [--headed] [--max-sessions <n>]
 ```
 
 ```bash pnpm
-pnpm exec e2e mcp [--config <path>] [--target <name>] [--headless] [--max-sessions <n>]
+pnpm exec e2e mcp [--config <path>] [--target <name>] [--headed] [--max-sessions <n>]
 ```
 
 ```bash bun
-bunx e2e mcp [--config <path>] [--target <name>] [--headless] [--max-sessions <n>]
+bunx e2e mcp [--config <path>] [--target <name>] [--headed] [--max-sessions <n>]
 ```
 </CodeGroup>
 
@@ -346,6 +347,8 @@ A positional starting with `-` that names no file is a usage error, exit 2.
 This is what `pnpm test:e2e -- --headed` produces: the `--` reaches e2e and
 `--headed` would otherwise be taken for a file. The message names the direct
 form, `pnpm exec e2e run --headed`.
+For npm, the direct form is `npm exec -- e2e run --headed`; npm needs the
+separator before the binary to pass its flags through.
 
 When nothing is left to run, `NO_TESTS` names the cause: no file matched the
 globs (with look-alike files such as `tests/login.test.ts`), a positional

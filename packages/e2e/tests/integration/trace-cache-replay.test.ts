@@ -6,7 +6,7 @@
  * an entry may hold is checked against the report and the entry files.
  */
 
-import { writeFileSync } from 'node:fs';
+import { readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -14,6 +14,7 @@ import type { TraceEntry } from '../../src/cache/trace.ts';
 import { main } from '../../src/cli/index.ts';
 import type { E2EConfig } from '../../src/index.ts';
 import { loopCalls } from '../helpers/fake-loop-model.ts';
+import { assertValidReport } from '../helpers/report-schema.ts';
 import { startFixtureApp, type FixtureApp } from '../helpers/fixture-app.ts';
 import { createProject, runExisting, webTarget, type FixtureProject, type RunOutcome } from '../helpers/run-project.ts';
 import {
@@ -35,6 +36,14 @@ import {
 
 const FLOWS_FILE = 'tests/flows.e2e.ts';
 
+/** The counter flow's entry file: its bytes and modification time, to prove a replay left it alone. */
+function counterEntryFile(project: FixtureProject): { bytes: string; mtimeMs: number } {
+  const counter = readEntries(project).filter(({ entry }) => entry.payload.recordedFor?.testId.endsWith(`::${encodeURIComponent('increments the counter')}`));
+  expect(counter).toHaveLength(1);
+  const { file } = counter[0]!;
+  return { bytes: readFileSync(file, 'utf8'), mtimeMs: statSync(file).mtimeMs };
+}
+
 /** One entry per act step every flow makes. */
 const ENTRY_COUNT = FLOWS.reduce((total, flow) => total + flow.actions.length, 0);
 
@@ -45,6 +54,8 @@ describe('trace cache: every flow records on the first run and replays without a
   let recordedModelCalls = 0;
   /** The archive entry as the first run wrote it; the second run opens the record under another id. */
   let recordedArchive: TraceEntry | undefined;
+  /** The counter entry's bytes and modification time as the first run wrote them. */
+  let recordedCounter: { bytes: string; mtimeMs: number } | undefined;
   let replayed: RunOutcome;
 
   beforeAll(async () => {
@@ -53,6 +64,7 @@ describe('trace cache: every flow records on the first run and replays without a
     recorded = await runExisting(project, { appUrl: app.url, config: cacheConfig(flowsModel()) });
     recordedModelCalls = loopCalls.length;
     [recordedArchive] = entriesFor(project, 'archives a record');
+    recordedCounter = counterEntryFile(project);
     writeFileSync(path.join(project.dir, FLOWS_FILE), flowsSuite(FLOWS, 'replay'), 'utf8');
     // The twins form moves every node, and the offers reverse, under the URL the recording saw.
     app.setVariant('b');
@@ -64,9 +76,11 @@ describe('trace cache: every flow records on the first run and replays without a
     await app?.close();
   });
 
-  it('passes every flow on both runs', () => {
+  it('passes every flow on both runs and reports both in the schema', () => {
     expectPassed(recorded);
     expectPassed(replayed);
+    assertValidReport(recorded.report);
+    assertValidReport(replayed.report);
   });
 
   it('misses every step on the first run and writes one entry per act step', () => {
@@ -81,6 +95,7 @@ describe('trace cache: every flow records on the first run and replays without a
       expect(entriesFor(project, flow.title), flow.title).toHaveLength(flow.actions.length);
     }
     expect(readEntries(project)).toHaveLength(ENTRY_COUNT);
+    expect(readEntries(project).map(({ entry }) => entry.schemaVersion)).toEqual(Array.from({ length: ENTRY_COUNT }, () => 'trace-1'));
   });
 
   it('replays every step on the second run with zero model calls across the whole run', () => {
@@ -91,6 +106,10 @@ describe('trace cache: every flow records on the first run and replays without a
       for (const [index, step] of steps.entries()) expectReplayed(step, flow.actions[index]!);
     }
     expect(readEntries(project)).toHaveLength(ENTRY_COUNT);
+  });
+
+  it('never rewrites an entry the cache replayed whole: the file keeps its bytes and its modification time', () => {
+    expect(counterEntryFile(project)).toEqual(recordedCounter);
   });
 
   it('keeps a unique() value as a slot in the typed text, the percent-encoded path, and the anchors', () => {
@@ -168,9 +187,11 @@ const DIVERGENCE: readonly Flow[] = [
   { ...archives, title: 'retires a record', open: () => '/records/2b3c4d5e6f7a' },
 ];
 
-describe('trace cache: a changed screen hands the step to the agent, which re-records it', () => {
+describe('trace cache: a changed screen hands the step to the agent, which re-records it, and --strict-cache fails it instead', () => {
   let app: FixtureApp;
   let project: FixtureProject;
+  let strict: RunOutcome;
+  let strictModelCalls = 0;
   let replayed: RunOutcome;
 
   beforeAll(async () => {
@@ -179,6 +200,9 @@ describe('trace cache: a changed screen hands the step to the agent, which re-re
     expectPassed(await runExisting(project, { appUrl: app.url, config: cacheConfig(flowsModel()) }));
     writeFileSync(path.join(project.dir, FLOWS_FILE), flowsSuite(DIVERGENCE, 'replay'), 'utf8');
     app.setVariant('renamed');
+    // A strict run first: it keeps the stale entries it failed on, so the lenient run after it meets the same recordings.
+    strict = await runExisting(project, { appUrl: app.url, config: cacheConfig(flowsModel()), runOptions: { strictCache: true } });
+    strictModelCalls = loopCalls.length;
     replayed = await runExisting(project, { appUrl: app.url, config: cacheConfig(flowsModel()) });
   }, 240_000);
 
@@ -187,7 +211,23 @@ describe('trace cache: a changed screen hands the step to the agent, which re-re
     await app?.close();
   });
 
-  it('passes every flow on the second run too', () => {
+  it('fails every diverged step with REPLAY_STALE, exit 2, without a model call or a retry', () => {
+    expect(strict.exitCode).toBe(2);
+    expect(strictModelCalls).toBe(0);
+    for (const [title, reason] of [
+      ['creates a company', 'target-not-found'],
+      ['archives a record', 'wrong-context'],
+      ['retires a record', 'target-not-found'],
+    ] as const) {
+      const step = onlyActStep(strict, title);
+      expect(step.error?.code, title).toBe('REPLAY_STALE');
+      expect(step.error?.message, title).toContain(reason);
+      expect(step.error?.message, title).toContain('re-record it with a read-write run without --strict-cache and commit the changed entry under .e2e/cache');
+      expect(step.cache?.reason, title).toBe(reason);
+    }
+  });
+
+  it('passes every flow on the lenient run', () => {
     expectPassed(replayed);
   });
 
@@ -216,44 +256,6 @@ describe('trace cache: a changed screen hands the step to the agent, which re-re
     expectMissed(step, 'target-not-found', 1);
     const [entry] = entriesFor(project, 'retires a record');
     expect(entry!.payload.actions[0]).toMatchObject({ name: 'tap', target: { role: 'button', name: 'Retire' } });
-  });
-});
-
-describe('trace cache: --strict-cache fails a stale recording instead of handing it to the agent', () => {
-  let app: FixtureApp;
-  let project: FixtureProject;
-  let strict: RunOutcome;
-  let strictModelCalls = 0;
-
-  beforeAll(async () => {
-    app = await startFixtureApp();
-    project = createProject({ [FLOWS_FILE]: flowsSuite(DIVERGENCE, 'record') });
-    expectPassed(await runExisting(project, { appUrl: app.url, config: cacheConfig(flowsModel()) }));
-    writeFileSync(path.join(project.dir, FLOWS_FILE), flowsSuite(DIVERGENCE, 'replay'), 'utf8');
-    app.setVariant('renamed');
-    strict = await runExisting(project, { appUrl: app.url, config: cacheConfig(flowsModel()), runOptions: { strictCache: true } });
-    strictModelCalls = loopCalls.length;
-  }, 240_000);
-
-  afterAll(async () => {
-    project?.cleanup();
-    await app?.close();
-  });
-
-  it('fails every diverged step with REPLAY_STALE, exit 2, without a model call or a retry', () => {
-    expect(strict.exitCode).toBe(2);
-    expect(strictModelCalls).toBe(0);
-    for (const [title, reason] of [
-      ['creates a company', 'target-not-found'],
-      ['archives a record', 'wrong-context'],
-      ['retires a record', 'target-not-found'],
-    ] as const) {
-      const step = onlyActStep(strict, title);
-      expect(step.error?.code, title).toBe('REPLAY_STALE');
-      expect(step.error?.message, title).toContain(reason);
-      expect(step.error?.message, title).toContain('re-record it with a read-write run without --strict-cache and commit the changed entry under .e2e/cache');
-      expect(step.cache?.reason, title).toBe(reason);
-    }
   });
 });
 

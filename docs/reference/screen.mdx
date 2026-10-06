@@ -1,6 +1,7 @@
 ---
 title: screen and Locator
 description: Queries, refinement, actions, and reads.
+icon: "display"
 ---
 
 A `Locator` stores a query and resolves it when an action, read, or assertion
@@ -178,14 +179,15 @@ not the finger: `'down'` reveals what is below. `momentum` is its fling
 strength, `'none'` by default: `'none'` a plain drag of half the surface,
 `'slow'` a short fling, `'fast'` a long one. How far each carries is the
 engine's.
-`{ from, to }` is a swipe along a path between two viewport points: a touch
-swipe on a device, a pointer drag on a document platform, which is what
-reveals a row action, dismisses a sheet, or drags a card between columns.
-Uses `config.actionTimeout`. Throws
-`ACTION_FAILED` when the gesture is rejected, `INVALID_ARGUMENT` for a mix
-of the two shapes or a coordinate off the plane, and `UNSUPPORTED_CAPABILITY`
-when the engine does not list `swipe` in its actions (a direction) or
-`swipeTo` in its pointer actions (a path).
+`{ from, to, duration? }` is a swipe along a path between two viewport points:
+a touch swipe on a device, a pointer drag on a document platform, which is
+what reveals a row action, dismisses a sheet, or drags a card between
+columns. `duration` sets how long the gesture takes in milliseconds; omitted
+leaves the duration to the engine's default. Uses `config.actionTimeout`.
+Throws `ACTION_FAILED` when the gesture is rejected, `INVALID_ARGUMENT` for
+a mix of the two shapes, an out-of-range duration, or a coordinate off the
+plane, and `UNSUPPORTED_CAPABILITY` when the engine does not list `swipe` in
+its actions (a direction) or `swipeTo` in its pointer actions (a path).
 
 ```ts
 await screen.swipe({ direction: 'up', momentum: 'fast' });
@@ -194,6 +196,7 @@ const row = await screen.getByText('Design review').boundingBox();
 await screen.swipe({
   from: { x: row.x + row.width - 10, y: row.y + row.height / 2 },
   to: { x: row.x + 10, y: row.y + row.height / 2 },
+  duration: 300,
 });
 ```
 
@@ -585,6 +588,7 @@ export interface SwipeOptions {
   momentum?: Momentum;
   from?: never;
   to?: never;
+  duration?: never;
 }
 
 /** A swipe along a path between two viewport points: a touch swipe on a device, a pointer drag on a document platform. */
@@ -593,6 +597,8 @@ export interface SwipePathOptions {
   from: Point;
   /** Where it lifts. */
   to: Point;
+  /** Gesture duration in milliseconds; omitted = the engine's default. */
+  duration?: number;
   direction?: never;
   momentum?: never;
 }

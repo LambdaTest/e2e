@@ -248,14 +248,13 @@ export class Invocation {
   /** Captures one raw observation through the shared race-hardened path. */
   private captureObservation(pixels: boolean): Promise<Observation> {
     return retryingObserve({
-      observe: (operation) => this.session.observe(operation, {
-        pixels,
-        pixelFallback: this.options.vision !== false && !this.runtime.exposure.withholdsPixels,
-      }),
+      observe: (operation, pixelFallback) => this.session.observe(operation, { pixels, pixelFallback }),
       operation: () => this.operation(),
       guard: (cause) => this.checkDeadline(cause),
       signal: this.runtime.engine.signal,
       api: this.options.api,
+      fallback: this.options.vision !== false,
+      tainted: () => this.runtime.exposure.withholdsPixels,
     });
   }
 

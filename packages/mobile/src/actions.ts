@@ -70,8 +70,19 @@ export function pointerInteraction(
       return client.interactions.press({ ...at, count: 2, ...settle });
     case 'longPress':
       return client.interactions.longPress({ ...at, ...settle, durationMs: action.durationMs ?? DEFAULT_LONG_PRESS_MS });
-    case 'swipeTo':
-      return client.interactions.swipe({ from: at, to: { x: action.target.x, y: action.target.y } });
+    case 'swipeTo': {
+      const to = { x: action.target.x, y: action.target.y };
+      if (action.durationMs !== undefined) {
+        return client.interactions.pan({
+          x: at.x,
+          y: at.y,
+          dx: to.x - at.x,
+          dy: to.y - at.y,
+          durationMs: action.durationMs,
+        });
+      }
+      return client.interactions.swipe({ from: at, to });
+    }
     case 'secondaryTap':
     case 'hover':
     case 'dragTo':

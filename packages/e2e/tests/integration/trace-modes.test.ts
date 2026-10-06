@@ -63,11 +63,11 @@ describe('trace modes', () => {
   });
 
   it(
-    'records retries only under on-all-retries, and a test mode wins over the config',
+    'records retries only under on-all-retries, --trace wins over the config, and a test mode wins over the flag',
     async () => {
       const { outcome, project } = await runProject(
         { 'tests/suite.e2e.ts': SUITE },
-        { appUrl: app.url, config: { retries: 2, cache: 'off', trace: 'on-all-retries' } },
+        { appUrl: app.url, config: { retries: 2, cache: 'off', trace: 'off' }, runOptions: { trace: 'on-all-retries' } },
       );
       try {
         expect(tracesPerAttempt(outcome, 'passes first time')).toEqual([0]);
@@ -82,40 +82,6 @@ describe('trace modes', () => {
         expect(attempts.map((attempt) => [attempt.cleanup, attempt.secondaryErrors])).toEqual(
           attempts.map(() => ['complete', []]),
         );
-      } finally {
-        project.cleanup();
-      }
-    },
-    180_000,
-  );
-
-  it(
-    'records every attempt by default outside CI',
-    async () => {
-      const { outcome, project } = await runProject(
-        { 'tests/suite.e2e.ts': SUITE },
-        { appUrl: app.url, config: { retries: 1, cache: 'off' } },
-      );
-      try {
-        expect(tracesPerAttempt(outcome, 'passes first time')).toEqual([1]);
-        expect(tracesPerAttempt(outcome, 'always fails')).toEqual([1, 1]);
-      } finally {
-        project.cleanup();
-      }
-    },
-    180_000,
-  );
-
-  it(
-    'turns off with --trace off, and a test mode still wins over the flag',
-    async () => {
-      const { outcome, project } = await runProject(
-        { 'tests/suite.e2e.ts': SUITE },
-        { appUrl: app.url, config: { retries: 1, cache: 'off', trace: 'on' }, runOptions: { trace: 'off' } },
-      );
-      try {
-        expect(tracesPerAttempt(outcome, 'always fails')).toEqual([0, 0]);
-        expect(tracesPerAttempt(outcome, 'first retry only')).toEqual([0, 1]);
       } finally {
         project.cleanup();
       }

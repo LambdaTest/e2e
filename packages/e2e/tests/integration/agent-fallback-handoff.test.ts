@@ -1,11 +1,12 @@
-/** Pixel-only evidence survives the cache handoff and every default-agent screen update. */
+/** Pixel-only evidence survives the cache handoff and every default-agent screen update, and no model sees it once a secret fill taints the attempt. */
 
-import { describe, expect, it } from 'vitest';
-import { defineEngine, EngineError, type EngineSnapshot } from '../../src/engine/index.ts';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { defineEngine, EngineError, type EngineObserveOptions, type EngineSnapshot } from '../../src/engine/index.ts';
 import { buildTraceEntry, type RecordedAction } from '../../src/cache/trace.ts';
 import type { StepExecutor } from '../../src/agent/executor.ts';
 import { installFakeLoopModel, loopCalls } from '../helpers/fake-loop-model.ts';
-import { runProject } from '../helpers/run-project.ts';
+import { fakeCalls, installFakeModel, judgment } from '../helpers/fake-model.ts';
+import { resultByTitle, runProject, type FixtureProject, type RunOutcome } from '../helpers/run-project.ts';
 import { assertValidReport } from '../helpers/report-schema.ts';
 
 const SUITE = `import { test } from 'e2e';
@@ -25,7 +26,7 @@ function pixelSnapshot(value = 1): EngineSnapshot {
 }
 
 describe('semantic fallback handoff', () => {
-  it.each([true, false, undefined])('requests pixels=%s after a semantic cache probe', async (pixels) => {
+  it.each([true, undefined])('requests pixels=%s after a semantic cache probe', async (pixels) => {
     const captures: boolean[] = [];
     const engine = defineEngine({
       name: 'requested-pixels-fixture', version: '1', spiVersion: 1, platform: 'fixture',
@@ -128,7 +129,10 @@ describe('semantic fallback handoff', () => {
       expect(captures).toEqual([true]);
       expect(loopCalls).toHaveLength(1);
       expect(loopCalls[0]?.imageParts).toBe(1);
+      expect(loopCalls[0]?.prompt).toContain('Screenshot attached: 2 by 2');
       expect(loopCalls[0]?.prompt).toContain('semantic capture unavailable');
+      expect(loopCalls[0]?.prompt).toContain('never infer absence');
+      expect(outcome.report.run.results[0]!.attempts[0]!.steps.find((step) => step.api === 'agent.act')?.visionInput).toBe(true);
       assertValidReport(outcome.report);
     } finally {
       project.cleanup();
@@ -310,5 +314,99 @@ describe('semantic fallback handoff', () => {
     } finally {
       project.cleanup();
     }
+  });
+});
+
+const SEMANTIC_SUITE = `import { test, credentials } from 'e2e';
+test('vision judgment receives fallback', async ({ agent }) => {
+  await agent.assert('the screenshot shows the result', { vision: true });
+});
+test('tree-only judgment cannot infer absence', async ({ agent }) => {
+  await agent.assert('nothing is visible', { vision: false });
+});
+test('act cannot recover pixels after a secret fill', async ({ agent, screen }) => {
+  await screen.getByRole('textbox').fill(credentials.user('member').password);
+  await agent.act('read the tainted screenshot');
+});
+test('judgment cannot recover pixels after a secret fill', async ({ agent, screen }) => {
+  await screen.getByRole('textbox').fill(credentials.user('member').password);
+  await agent.assert('read the tainted result', { vision: true });
+});
+test('tree-only judgment after a secret fill keeps the engine timeout', async ({ agent, screen }) => {
+  await screen.getByRole('textbox').fill(credentials.user('member').password);
+  await agent.assert('the tainted result is listed', { vision: false });
+});`;
+
+describe('agent semantic fallback through the engine contract', () => {
+  let project: FixtureProject;
+  let outcome: RunOutcome;
+  const captures: { filled: boolean; options: EngineObserveOptions | undefined }[] = [];
+
+  beforeAll(async () => {
+    let filled = false;
+    const engine = defineEngine({
+      name: 'masked-fixture', version: '1', spiVersion: 1, platform: 'fixture',
+      actions: ['fill'],
+      startAttempt: async () => { filled = false; },
+      locate: async () => [{ ref: { id: 'password', revision: '' }, role: 'textbox', inputPurpose: 'password', states: { secure: true } }],
+      perform: async () => { filled = true; },
+      observe: async (_operation, options) => {
+        captures.push({ filled, options });
+        if (options?.pixelFallback !== true) {
+          throw new EngineError('OPERATION_TIMEOUT', 'semantic capture timed out', { retryable: false });
+        }
+        return {
+          root: { ref: { id: 'root', revision: '' } },
+          location: 'fixture:result',
+          viewport: { width: 2, height: 2 },
+          treeUnavailable: true,
+          pixels: { data: new Uint8Array([1, 2, 3]), mediaType: 'image/png', width: 2, height: 2, scale: 1 },
+          maskedRegionCount: 0,
+        };
+      },
+    });
+    const model = installFakeLoopModel(() => [{ toolName: 'complete_step', input: { status: 'passed', summary: 'read pixels' } }]);
+    const judge = installFakeModel(() => judgment(true, 'visible in the screenshot'));
+    const result = await runProject({ 'tests/fallback.e2e.ts': SEMANTIC_SUITE }, {
+      appUrl: 'https://fixture.test',
+      config: {
+        tests: 'tests/**/*.e2e.ts',
+        targets: [{ name: 'fixture', engine }],
+        agents: { default: { model, judge } },
+        credentials: { member: { username: 'member', password: 'fixture-secret-value' } },
+      },
+    });
+    project = result.project;
+    outcome = result.outcome;
+    expect(outcome.report.run.errors).toEqual([]);
+  });
+
+  afterAll(() => project?.cleanup());
+
+  it('judges the current screenshot with vision enabled', () => {
+    expect(resultByTitle(outcome, 'vision judgment receives fallback').status).toBe('passed');
+    expect(fakeCalls).toHaveLength(1);
+    expect(fakeCalls[0]!.images).toEqual([{ mediaType: 'image/png', bytes: 3 }]);
+    expect(fakeCalls[0]!.observation).toContain('semantic capture unavailable');
+  });
+
+  it('stops tree-only and tainted judgments before a model call', () => {
+    for (const title of ['tree-only judgment cannot infer absence', 'tree-only judgment after a secret fill keeps the engine timeout']) {
+      const result = resultByTitle(outcome, title);
+      expect(result.status).toBe('failed');
+      expect(result.attempts[0]!.error?.message).toContain('timed out');
+    }
+    for (const title of ['act cannot recover pixels after a secret fill', 'judgment cannot recover pixels after a secret fill']) {
+      const error = resultByTitle(outcome, title).attempts[0]!.error;
+      expect(error?.code).toBe('POLICY_DENIED');
+      expect(error?.message).toContain('a secret was filled in this attempt');
+    }
+    const act = resultByTitle(outcome, 'act cannot recover pixels after a secret fill').attempts[0]!.steps.find((step) => step.api === 'agent.act');
+    expect(act?.events?.filter((event) => event.kind === 'observation')).toEqual([expect.objectContaining({ status: 'failed', code: 'POLICY_DENIED' })]);
+    const tainted = captures.filter((capture) => capture.filled);
+    expect(tainted.length).toBeGreaterThanOrEqual(3);
+    expect(tainted.every((capture) => capture.options?.pixelFallback !== true && capture.options?.pixels !== true)).toBe(true);
+    expect(loopCalls).toEqual([]);
+    assertValidReport(outcome.report);
   });
 });

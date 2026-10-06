@@ -11,7 +11,6 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { defineTool } from '../../src/agent/public.ts';
 import type { StepExecutor } from '../../src/agent/executor.ts';
-import type { AgentConfig } from '../../src/types.ts';
 import { explore, type ExploreOptions, type ExploreOutcome } from '../../src/explore/index.ts';
 import { FINDING_TOOL_NAME } from '../../src/explore/executor.ts';
 import type { ModelInstance } from '../../src/types.ts';
@@ -65,15 +64,14 @@ async function runExplore(
   project: FixtureProject,
   app: FixtureApp,
   model: ModelInstance,
-  options: Partial<ExploreOptions> & { projectAgent?: AgentConfig | undefined } = {},
+  options: Partial<ExploreOptions> = {},
 ): Promise<ExploreOutcome> {
-  const { projectAgent, ...rest } = options;
   const notices: string[] = [];
   const outcome = await explore({
     cwd: project.dir,
     rawConfig: {
       targets: [{ name: 'web', engine: web(), app: { url: app.url } }] as never,
-      agents: { default: projectAgent ?? { model } },
+      agents: { default: { model } },
       // The scripted loop answers instantly; the deterministic engine budget is the one that matters.
       actionTimeout: 10_000,
     },
@@ -81,7 +79,7 @@ async function runExplore(
     maxSteps: 2,
     timeoutMs: 180_000,
     notice: (message) => notices.push(message),
-    ...rest,
+    ...options,
   });
   return Object.assign(outcome, { notices });
 }
@@ -191,9 +189,8 @@ describe('e2e explore', () => {
     expect(written.run.explore).toEqual(record);
   }, 120_000);
 
-  it('passes with warnings only, and offers the project tools of the agents entry', async () => {
+  it('passes with warnings only', async () => {
     let plans = 0;
-    const seen: string[][] = [];
     const model = installExploreModel({
       plan: () => {
         plans += 1;
@@ -202,24 +199,13 @@ describe('e2e explore', () => {
           : { decision: 'finish', summary: 'Only polish items.' };
       },
       loop: (call) => {
-        seen.push([...call.toolNames]);
-        if (call.turn === 1) return [{ toolName: 'ping', input: {} }];
-        if (call.turn === 2) return [{ toolName: FINDING_TOOL_NAME, input: { ...COUNTER_FINDING, kind: 'warning', severity: 1 } }];
+        if (call.turn === 1) return [{ toolName: FINDING_TOOL_NAME, input: { ...COUNTER_FINDING, kind: 'warning', severity: 1 } }];
         return [{ toolName: 'complete_step', input: { status: 'passed', summary: 'Menu toggles' } }];
       },
     });
-    const ping = defineTool(
-      { description: 'answers pong', inputSchema: z.object({}), execute: async () => 'pong' },
-      { mutates: false },
-    );
-    const outcome = await runExplore(project, app, model, {
-      projectAgent: { model, tools: { ping }, system: 'Project guidance line.' },
-    });
+    const outcome = await runExplore(project, app, model);
     expect(outcome.exitCode).toBe(0);
     expect(outcome.status).toBe('passed');
-    expect(seen[0]).toContain('ping');
-    expect(seen[0]).toContain(FINDING_TOOL_NAME);
-    expect(loopCalls.at(-1)!.toolResults).toContain('pong');
     expect(outcome.report.run.explore!.findings[0]).toMatchObject({ kind: 'warning', severity: 1 });
     expect((outcome as unknown as { notices: string[] }).notices).toEqual([]);
   }, 120_000);
@@ -295,26 +281,6 @@ describe('e2e explore', () => {
     expect(runNotices).toEqual([
       "trace: 'on-first-retry' records retries only, and explore runs its goal once, so no traces will be recorded; pass --trace on",
       "video: 'on-first-retry' records retries only, and explore runs its goal once, so no videos will be recorded; pass --video on",
-    ]);
-  }, 120_000);
-
-  it('is blocked when the agent explores nothing, and replaces a custom executor with a notice', async () => {
-    const model = installExploreModel({
-      plan: () => ({ decision: 'finish', summary: 'Nothing here.' }),
-      loop: () => [{ toolName: 'complete_step', input: { status: 'passed', summary: 'unused' } }],
-    });
-    const custom: StepExecutor = {
-      name: 'house-brain',
-      runStep: async () => ({ status: 'passed', summary: 'never runs' }),
-    };
-    const outcome = await runExplore(project, app, model, {
-      projectAgent: { model, executor: custom },
-    });
-    expect(outcome.status).toBe('blocked');
-    expect(outcome.report.run.explore).toMatchObject({ ended: 'finished', steps: [], findings: [] });
-    expect(outcome.report.run.results[0]!.attempts[0]!.error?.code).toBe('AUTOMATION_UNSUPPORTED');
-    expect((outcome as unknown as { notices: string[] }).notices).toEqual([
-      'agents.default is a custom executor ("house-brain"); explore runs the built-in agent instead',
     ]);
   }, 120_000);
 
@@ -395,6 +361,7 @@ describe('e2e explore', () => {
       },
       loop: (call) => {
         seen.push([...call.toolNames]);
+        if (call.turn === 1) return [{ toolName: 'ping', input: {} }];
         return [{ toolName: 'complete_step', input: { status: 'passed', summary: 'looked' } }];
       },
     });
@@ -421,6 +388,7 @@ describe('e2e explore', () => {
     // The ux agent's tool is in the explorer's vocabulary.
     expect(seen[0]).toContain('ping');
     expect(seen[0]).toContain(FINDING_TOOL_NAME);
+    expect(loopCalls.at(-1)!.toolResults).toContain('pong');
 
     await expect(
       explore({ cwd: project.dir, rawConfig: { targets: [{ name: 'web', engine: web(), app: { url: app.url } }] as never, agents: { default: { model } } }, agent: 'nope' }),
@@ -440,6 +408,27 @@ describe('e2e explore', () => {
     });
     expect(notices).toContain('agents.custom is a custom executor ("math-brain"); explore runs the built-in agent instead');
   }, 60_000);
+
+  it('replaces a custom executor with the built-in agent on the model it brought, and is blocked when nothing is explored', async () => {
+    const model = installExploreModel({
+      plan: () => ({ decision: 'finish', summary: 'Nothing here.' }),
+      loop: () => [{ toolName: 'complete_step', input: { status: 'passed', summary: 'unused' } }],
+    });
+    const custom: StepExecutor = { name: 'house-brain', model, runStep: async () => ({ status: 'passed', summary: 'never runs' }) };
+    const notices: string[] = [];
+    const outcome = await explore({
+      cwd: project.dir,
+      rawConfig: { targets: [{ name: 'web', engine: web(), app: { url: app.url } }] as never, agents: { default: { executor: custom } } },
+      goal: 'Explore the home page and find bugs',
+      maxSteps: 2,
+      timeoutMs: 180_000,
+      notice: (message) => notices.push(message),
+    });
+    expect(outcome.status).toBe('blocked');
+    expect(outcome.report.run.explore).toMatchObject({ ended: 'finished', steps: [], findings: [] });
+    expect(outcome.report.run.results[0]!.attempts[0]!.error?.code).toBe('AUTOMATION_UNSUPPORTED');
+    expect(notices).toEqual(['agents.default is a custom executor ("house-brain"); explore runs the built-in agent instead, with the model that executor brought']);
+  }, 120_000);
 
   it('lets the explorer sign in with a configured credential through type_secret, never seeing the password', async () => {
     const planPrompts: string[] = [];

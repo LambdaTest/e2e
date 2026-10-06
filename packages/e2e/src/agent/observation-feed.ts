@@ -370,14 +370,13 @@ export class ObservationFeed {
   private async capture(pixels: boolean): Promise<AgentObservation> {
     this.opening = undefined;
     const raw = await retryingObserve({
-      observe: (operation) => this.runtime.engine.session.observe(operation, {
-        pixels,
-        pixelFallback: !this.runtime.exposure.withholdsPixels,
-      }),
+      observe: (operation, pixelFallback) => this.runtime.engine.session.observe(operation, { pixels, pixelFallback }),
       operation: () => this.accounting.operation(),
       guard: (cause) => this.accounting.checkpoint(cause),
       signal: this.runtime.engine.signal,
       api: this.accounting.api,
+      fallback: true,
+      tainted: () => this.runtime.exposure.withholdsPixels,
     });
     if (raw.kind === 'pixels') {
       this.semanticHistory = false;

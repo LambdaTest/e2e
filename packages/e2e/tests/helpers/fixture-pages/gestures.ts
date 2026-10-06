@@ -41,8 +41,8 @@ export const GESTURE_PAGES: Record<string, PageRenderer> = {
 
   <fieldset id="delivery"><legend>Delivery</legend><label><input type="radio" name="delivery" value="Express" />Express</label></fieldset>
 
-  <p>Page the ledger down to Row 333 and stop there.</p>
-  <span>Jump to Row 333</span>
+  <p>Page the ledger down to Row 24 and stop there.</p>
+  <span>Jump to Row 24</span>
   <div id="ledger" role="list" aria-label="Ledger" style="position:relative;height:200px;overflow:auto;border:1px solid #000"><div id="ledger-spacer"></div></div>
   <output aria-label="Ledger state">golden out of view</output>
   <div style="height:3000px"></div>
@@ -80,7 +80,7 @@ export const GESTURE_PAGES: Record<string, PageRenderer> = {
     // A windowed list: 400 rows of 40 px exist as data, and only the rows
     // inside the container's scrolled window are in the DOM, so the golden
     // row is nowhere in the tree until the list is paged down to it.
-    const ROWS = 400, ROW_PX = 40, GOLDEN = 333;
+    const ROWS = 400, ROW_PX = 40, GOLDEN = 24;
     const ledger = document.getElementById('ledger');
     document.getElementById('ledger-spacer').style.height = ROWS * ROW_PX + 'px';
     const ledgerState = document.querySelector('output[aria-label="Ledger state"]');

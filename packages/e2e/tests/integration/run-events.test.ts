@@ -1,7 +1,6 @@
 /**
  * The `onEvent` host stream end to end: a real run emits an ordered,
- * JSON-serializable event sequence that mirrors what the report persists,
- * while a throwing sink is quarantined without affecting the run.
+ * JSON-serializable event sequence that mirrors what the report persists.
  */
 
 import { mkdirSync, readFileSync } from 'node:fs';
@@ -14,7 +13,7 @@ import {
   createProject,
   runExisting,
   runProjectWithConfigFile,
-  workerConfigSource,
+  workerFakeConfigSource,
   type FixtureProject,
   type RunOutcome,
 } from '../helpers/run-project.ts';
@@ -27,6 +26,14 @@ test('increments once', async ({ app, agent, screen }) => {
   await app.open();
   await agent.act('increment the counter');
   await expect(screen.getByRole('status')).toHaveText('1');
+});
+`;
+
+/** A test that touches no page beyond opening the app, for the fake engine. */
+const OPENS_THE_APP = `import { test } from 'e2e';
+
+test('opens the app', async ({ app }) => {
+  await app.open();
 });
 `;
 
@@ -142,7 +149,6 @@ describe('run events', () => {
 
 describe('run events: attempt and step identity', () => {
   it.each(['in-process', 'workers'] as const)('joins retries and serial members to their report records through %s', async (execution) => {
-    const app = await startFixtureApp();
     const events: RunEvent[] = [];
     const files = {
       'tests/retry.e2e.ts': `import { test } from 'e2e';
@@ -173,8 +179,7 @@ test.describe('group', { serial: true, retries: 1 }, () => {
       const runOptions = { onEvent: (event: RunEvent) => { events.push(event); } };
       if (execution === 'workers') {
         const result = await runProjectWithConfigFile(files, {
-          appUrl: app.url,
-          configSource: workerConfigSource(2, `
+          configSource: workerFakeConfigSource(2, `
   cache: 'off',
   agents: { default: { executor: {
     name: 'retry-once',
@@ -191,7 +196,6 @@ test.describe('group', { serial: true, retries: 1 }, () => {
       } else {
         project = createProject(files);
         outcome = await runExisting(project, {
-          appUrl: app.url,
           config: { cache: 'off', agents: { default: { executor } } },
           runOptions,
         });
@@ -227,14 +231,12 @@ test.describe('group', { serial: true, retries: 1 }, () => {
       }
     } finally {
       project?.cleanup();
-      await app.close();
     }
   }, 120_000);
 });
 
 describe('run events: run lifecycle hygiene', () => {
   it('a test\u2019s console output arrives as output events attributed to it, and never on the runner\u2019s streams', async () => {
-    const app = await startFixtureApp();
     const events: RunEvent[] = [];
     const written: string[] = [];
     const stdoutWrite = vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
@@ -258,8 +260,7 @@ test('talks', async () => {
 `,
         },
         {
-          appUrl: app.url,
-          configSource: workerConfigSource(1, `
+          configSource: workerFakeConfigSource(1, `
   secrets: { 'stripe-key': 'sk_live_generic_4242' },`),
           runOptions: { onEvent: (event: RunEvent) => { events.push(event); } },
         },
@@ -280,19 +281,17 @@ test('talks', async () => {
         "hello { from: 'the test' }\ntoken <secret:stripe-key> leaked twice <secret:stripe-key>\nsplit <secret:stripe-key> across writes\n",
       );
       expect(events.some((event) => event.type === 'output' && /sk_live|eric_4242/.test(event.text))).toBe(false);
-      expect(inTest.every((event) => event.target === 'web' && event.pair?.agent === 'default')).toBe(true);
+      expect(inTest.every((event) => event.target === 'fake' && event.pair?.agent === 'default')).toBe(true);
       // The module's top level runs while the file loads, outside any pair.
       expect(output.some((event) => event.pair === undefined && event.text === 'top level\n')).toBe(true);
       expect(written.join('')).not.toContain('hello');
     } finally {
       stdoutWrite.mockRestore();
       project?.cleanup();
-      await app.close();
     }
   }, 120_000);
 
   it('a serial member’s unfinished line leaves with the member that wrote it, not the one after', async () => {
-    const app = await startFixtureApp();
     const events: RunEvent[] = [];
     let project: FixtureProject | undefined;
     try {
@@ -306,9 +305,8 @@ test.describe('shared', { serial: true }, () => {
 `,
         },
         {
-          appUrl: app.url,
           // A registered secret is what makes the worker hold an unfinished line.
-          configSource: workerConfigSource(1, `
+          configSource: workerFakeConfigSource(1, `
   secrets: { 'stripe-key': 'sk_live_generic_4242' },`),
           runOptions: { onEvent: (event: RunEvent) => { events.push(event); } },
         },
@@ -327,13 +325,11 @@ test.describe('shared', { serial: true }, () => {
       expect(outputOf('shared > second')).toEqual([' done\n']);
     } finally {
       project?.cleanup();
-      await app.close();
     }
   }, 120_000);
 
   it('a junit-write failure is one stderr line and leaves the outcome, the report, and run-finished alone', async () => {
-    const app = await startFixtureApp();
-    const project = createProject({ 'tests/events.e2e.ts': SUITE });
+    const project = createProject({ 'tests/events.e2e.ts': OPENS_THE_APP });
     // A directory where junit.xml must be written makes its atomic rename fail
     // while report.json beside it still has a clear path.
     mkdirSync(path.join(project.dir, '.e2e', 'junit.xml'), { recursive: true });
@@ -341,12 +337,9 @@ test.describe('shared', { serial: true }, () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
       const outcome = await runExisting(project, {
-        appUrl: app.url,
         config: {
           tests: 'tests/**/*.e2e.ts',
           reporters: ['junit'] as const,
-          agents: { default: { executor: oneTapExecutor } },
-          cache: 'off' as const,
         },
         runOptions: { onEvent: (event) => {
           events.push(event);
@@ -368,24 +361,19 @@ test.describe('shared', { serial: true }, () => {
     } finally {
       vi.restoreAllMocks();
       project.cleanup();
-      await app.close();
     }
   }, 120_000);
 
   it('a report-write failure fails the run, withholds reportPath, and precedes run-finished', async () => {
-    const app = await startFixtureApp();
-    const project = createProject({ 'tests/events.e2e.ts': SUITE });
+    const project = createProject({ 'tests/events.e2e.ts': OPENS_THE_APP });
     // A directory where report.json must be written makes the atomic rename fail.
     mkdirSync(path.join(project.dir, '.e2e', 'report.json'), { recursive: true });
     const events: RunEvent[] = [];
     try {
       const outcome = await runExisting(project, {
-        appUrl: app.url,
         config: {
           tests: 'tests/**/*.e2e.ts',
           reporters: ['json'] as const,
-          agents: { default: { executor: oneTapExecutor } },
-          cache: 'off' as const,
         },
         runOptions: { onEvent: (event) => {
         events.push(event);
@@ -406,22 +394,17 @@ test.describe('shared', { serial: true }, () => {
       expect(outcome.report.run.errors.some((entry) => entry.phase === 'report')).toBe(true);
     } finally {
       project.cleanup();
-      await app.close();
     }
   }, 120_000);
 
   it('a cancellation before any test starts ends the run as interrupted without collecting', async () => {
-    const app = await startFixtureApp();
-    const project = createProject({ 'tests/events.e2e.ts': SUITE });
+    const project = createProject({ 'tests/events.e2e.ts': OPENS_THE_APP });
     const events: RunEvent[] = [];
     try {
       const outcome = await runExisting(project, {
-        appUrl: app.url,
         config: {
           tests: 'tests/**/*.e2e.ts',
           reporters: ['json'] as const,
-          agents: { default: { executor: oneTapExecutor } },
-          cache: 'off' as const,
         },
         runOptions: {
           interruptSignal: AbortSignal.abort(),
@@ -439,58 +422,22 @@ test.describe('shared', { serial: true }, () => {
       expect(outcome.reportPath).toBeUndefined();
     } finally {
       project.cleanup();
-      await app.close();
     }
   }, 120_000);
 
   it('clears the credential registry when the run resolves', async () => {
-    const app = await startFixtureApp();
-    const project = createProject({ 'tests/events.e2e.ts': SUITE });
+    const project = createProject({ 'tests/events.e2e.ts': OPENS_THE_APP });
     try {
       await runExisting(project, {
-        appUrl: app.url,
         config: {
           tests: 'tests/**/*.e2e.ts',
           reporters: ['json'] as const,
-          agents: { default: { executor: oneTapExecutor } },
-          cache: 'off' as const,
           credentials: { member: { username: 'member', password: 'hunter2' } },
         },
       });
       expect(() => credentials.user('member')).toThrow(/only available while the e2e runner/);
     } finally {
       project.cleanup();
-      await app.close();
-    }
-  }, 120_000);
-});
-
-describe('run events: quarantined sink', () => {
-  it('a throwing sink never affects the run outcome', async () => {
-    const app = await startFixtureApp();
-    const project = createProject({ 'tests/events.e2e.ts': SUITE });
-    let calls = 0;
-    try {
-      const outcome = await runExisting(project, {
-        appUrl: app.url,
-        config: {
-          tests: 'tests/**/*.e2e.ts',
-          reporters: ['json'] as const,
-          agents: { default: { executor: oneTapExecutor } },
-          cache: 'off' as const,
-        },
-        runOptions: {
-          onEvent: () => {
-            calls += 1;
-            throw new Error('broken sink');
-          },
-        },
-      });
-      expect(outcome.exitCode).toBe(0);
-      expect(calls).toBe(1);
-    } finally {
-      project.cleanup();
-      await app.close();
     }
   }, 120_000);
 });

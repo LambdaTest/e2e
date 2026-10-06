@@ -27,7 +27,7 @@ function compiled(): ValidateFunction {
 }
 
 /** True when the document satisfies the canonical session-1 schema. */
-export function isValidSessionEnvelope(document: unknown): boolean {
+function isValidSessionEnvelope(document: unknown): boolean {
   return compiled()(document) as boolean;
 }
 
@@ -38,7 +38,3 @@ export function assertValidSessionEnvelope(document: unknown): void {
   }
 }
 
-/** Loads one schema fixture by name, e.g. `session-v1.valid.json`. */
-export function specFixture(name: string): unknown {
-  return JSON.parse(readFileSync(path.join(SCHEMA_ROOT, 'fixtures', name), 'utf8'));
-}

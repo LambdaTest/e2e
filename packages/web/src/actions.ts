@@ -14,6 +14,7 @@ import {
   performPointerDrag,
   performViewportSwipe,
   POST_DISPATCH_PATTERN,
+  translatePwError,
   type ActionTarget,
 } from './support.ts';
 
@@ -169,7 +170,12 @@ export async function dispatchLocatorAction(
  * behind it: no actionability wait, because there is no element to wait on,
  * and the page decides what the gesture lands on, as it does for a person.
  */
-export async function dispatchPointerAction(page: Page, at: ViewportPoint, action: PointerAction): Promise<void> {
+export async function dispatchPointerAction(
+  page: Page,
+  at: ViewportPoint,
+  action: PointerAction,
+  signal?: AbortSignal,
+): Promise<void> {
   const { mouse } = page;
   const point = nearestPixel(at);
   switch (action.kind) {
@@ -189,9 +195,11 @@ export async function dispatchPointerAction(page: Page, at: ViewportPoint, actio
       await mouse.move(point.x, point.y);
       return;
     case 'dragTo':
+      await performPointDrag(mouse, point, action.target, undefined, signal);
+      return;
     case 'swipeTo':
       // A swipe along a path is a pointer drag on a document platform.
-      await performPointDrag(mouse, point, action.target);
+      await performPointDrag(mouse, point, action.target, action.durationMs, signal);
       return;
     case 'swipe':
       // The pointer moves to the point first so the scrollable under it receives the wheel.
@@ -199,6 +207,24 @@ export async function dispatchPointerAction(page: Page, at: ViewportPoint, actio
       await performViewportSwipe(page, action.direction, action.momentum ?? 'none');
       return;
   }
+}
+
+/**
+ * An input operation the operation deadline cut off: Playwright never
+ * answered, so whether the input reached the page is unknown, and it must not
+ * be repeated blindly.
+ */
+function inputCutOff(cause: unknown, label: string): EngineError | undefined {
+  if (!(cause instanceof EngineError) || cause.code !== 'OPERATION_TIMEOUT') return undefined;
+  return new EngineError('ACTION_MAY_HAVE_COMMITTED', `${label} timed out before the page answered; its input may have been dispatched`, {
+    retryable: false,
+    cause,
+  });
+}
+
+/** Translates the failure of an input operation with no element behind it: a pointer action at a point, or a keystroke. */
+export function classifyInputError(cause: unknown, label: string): Error {
+  return inputCutOff(cause, label) ?? translatePwError(cause, label);
 }
 
 /**
@@ -238,14 +264,27 @@ function actionabilitySummary(text: string): string {
 /**
  * Classifies a failed action onto the error contract (see the table above
  * `POST_DISPATCH_PATTERN` in support.ts): stale, not actionable, possibly
- * committed, or an engine fault.
+ * committed, or an engine fault. A strict mode violation is a located match
+ * that turned ambiguous: stale like a detached one before any input, so the
+ * runner locates again and reports the ambiguity or acts on the one match
+ * left; possibly committed once input went out, as the second side of a drag
+ * resolves after the press.
  */
 export function classifyActionError(rawCause: unknown, action: LocatorAction): Error {
+  const cut = inputCutOff(rawCause, action.kind);
+  if (cut !== undefined) return cut;
   if (isClassified(rawCause)) return rawCause;
   const text = redactSensitive(message(rawCause), action);
   const cause = isSensitive(action) ? undefined : rawCause;
   if (/strict mode violation/i.test(text)) {
-    return new EngineError('ENGINE_FAILURE', text, { retryable: false, cause });
+    if (POST_DISPATCH_PATTERN.test(text)) {
+      return new EngineError(
+        'ACTION_MAY_HAVE_COMMITTED',
+        `${action.kind} matched more than one element after its input was dispatched: ${text}`,
+        { retryable: false, cause },
+      );
+    }
+    return new EngineError('NODE_STALE', text, { retryable: true, cause });
   }
   if (DETACHED_PATTERN.test(text)) {
     return new EngineError('NODE_STALE', text, { retryable: true, cause });

@@ -7,9 +7,12 @@
  * report record carries. Both refs land on the group attempt's record.
  */
 
+import { existsSync } from 'node:fs';
+import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { ArtifactStore, StoredArtifact } from '../../src/types.ts';
 import { startFixtureApp, type FixtureApp } from '../helpers/fixture-app.ts';
+import { assertValidReport } from '../helpers/report-schema.ts';
 import { createProject, runExisting, type FixtureProject } from '../helpers/run-project.ts';
 
 const SERIAL_SUITE = `import { test, expect } from 'e2e';
@@ -91,7 +94,13 @@ describe('ArtifactStore across a serial group', () => {
     for (const put of shots) expect(put.attemptId).toBe(groupAttempt.id);
     const shotRecords = groupAttempt.artifacts.filter((artifact) => artifact.kind === 'screenshot');
     expect(shotRecords).toHaveLength(2);
-    for (const record of shotRecords) expect(record.ref).toMatch(/^store:\/\/screenshot\//);
+    for (const record of shotRecords) {
+      expect(record.ref).toMatch(/^store:\/\/screenshot\//);
+      expect(existsSync(path.join(project.dir, '.e2e', 'artifacts', record.path!))).toBe(true);
+      expect(record.size).toBeGreaterThan(0);
+      expect(record.sha256).toMatch(/^[0-9a-f]{64}$/);
+    }
+    assertValidReport(outcome.report);
 
     // Every store identity is a real report identity.
     const reportedIds = new Set(groups.flatMap((group) => group.attempts.map((attempt) => attempt.id)));

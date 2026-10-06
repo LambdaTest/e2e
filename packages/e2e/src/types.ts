@@ -408,6 +408,7 @@ export interface SwipeOptions {
   momentum?: Momentum;
   from?: never;
   to?: never;
+  duration?: never;
 }
 
 /** A swipe along a path between two viewport points: a touch swipe on a device, a pointer drag on a document platform. */
@@ -416,6 +417,8 @@ export interface SwipePathOptions {
   from: Point;
   /** Where it lifts. */
   to: Point;
+  /** Gesture duration in milliseconds; omitted = the engine's default. */
+  duration?: number;
   direction?: never;
   momentum?: never;
 }

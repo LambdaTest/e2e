@@ -367,6 +367,7 @@ void (executorContext.actions.hitTest(point) satisfies Promise<PointHit>);
 void screen.tapAt(point, { timeout: 1_000 });
 void screen.swipe({ direction: 'up', momentum: 'fast' });
 void screen.swipe({ from: point, to: point });
+void screen.swipe({ from: point, to: point, duration: 300 });
 void screen.getByRole('image').tap({ position: point, timeout: 1_000 });
 const rangeKeys: readonly KeyModifier[] = ['Shift', 'ControlOrMeta'];
 void screen.getByRole('row').click({ modifiers: rangeKeys });
@@ -382,6 +383,8 @@ void screen.swipe({ from: point });
 void screen.swipe({ direction: 'up', to: point });
 // @ts-expect-error a locator swipe is directional; the path form is screen.swipe.
 void screen.getByRole('image').swipe({ from: point, to: point });
+// @ts-expect-error a directional swipe takes no duration.
+void screen.swipe({ direction: 'up', duration: 300 });
 // @ts-expect-error a surface without a url has no base URL; a test must handle undefined
 const appOrigin: string = appFixture.baseUrl;
 void appOrigin;

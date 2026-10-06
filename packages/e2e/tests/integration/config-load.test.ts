@@ -1,6 +1,6 @@
-/** Loading a config module: a config error it raises while it evaluates keeps its code, and any other throw is CONFIG_LOAD_FAILED. */
+/** Loading a config module: a config error it raises while it evaluates keeps its code, any other throw is CONFIG_LOAD_FAILED with the original message, and a symlinked config loads. */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -50,8 +50,46 @@ describe('loadConfigModule', () => {
     await expect(loadConfigModule(path.join(dir, 'e2e.config.ts'))).rejects.toMatchObject({ category: 'infrastructure', code: 'BROWSER_MISSING', message: 'no browser' });
   });
 
-  it('reports any other throw while the config evaluates as CONFIG_LOAD_FAILED', async () => {
-    writeFileSync(path.join(dir, 'e2e.config.ts'), `throw new Error('boom');\nexport default {};\n`);
+  it('preserves the original load error', async () => {
+    writeFileSync(path.join(dir, 'e2e.config.ts'), "throw new Error('config setup failed');\n");
+    await expect(loadConfigModule(path.join(dir, 'e2e.config.ts'))).rejects.toMatchObject({
+      code: 'CONFIG_LOAD_FAILED',
+      message: `failed to load config ${path.join(dir, 'e2e.config.ts')}: config setup failed`,
+    });
+  });
+
+  it('keeps the code of a configuration error the config throws while it evaluates', async () => {
+    writeFileSync(
+      path.join(dir, 'e2e.config.ts'),
+      `import { ConfigurationError } from '${ENGINE}';\nthrow new ConfigurationError('INVALID_CONFIG', 'web({ video }) was renamed web({ screencast })');\n`,
+    );
+    await expect(loadConfigModule(path.join(dir, 'e2e.config.ts'))).rejects.toMatchObject({
+      code: 'INVALID_CONFIG',
+      message: 'web({ video }) was renamed web({ screencast })',
+    });
+  });
+
+  it('keeps the code of a configuration error from another copy of e2e, and only a configuration one', async () => {
+    const foreign = (category: string) =>
+      `const error = new Error('refused by a second copy');\nObject.assign(error, { [Symbol.for('e2e.error.v1')]: true, category: '${category}', code: 'INVALID_CONFIG', retryable: false });\nthrow error;\n`;
+    writeFileSync(path.join(dir, 'e2e.config.ts'), foreign('configuration'));
+    await expect(loadConfigModule(path.join(dir, 'e2e.config.ts'))).rejects.toMatchObject({
+      code: 'INVALID_CONFIG',
+      message: 'refused by a second copy',
+    });
+    writeFileSync(path.join(dir, 'e2e.config.ts'), foreign('test'));
     await expect(loadConfigModule(path.join(dir, 'e2e.config.ts'))).rejects.toMatchObject({ code: 'CONFIG_LOAD_FAILED' });
+  });
+
+  it('loads a config through a symlink', async () => {
+    const sourceDir = path.join(dir, 'source');
+    mkdirSync(sourceDir);
+    const source = path.join(sourceDir, 'e2e.config.ts');
+    writeFileSync(source, "export default { targets: [{ name: 'local', platform: 'test' }] };\n");
+    const linked = path.join(dir, 'e2e.config.ts');
+    symlinkSync(source, linked, 'file');
+    await expect(loadConfigModule(linked)).resolves.toMatchObject({
+      targets: [{ name: 'local', platform: 'test' }],
+    });
   });
 });

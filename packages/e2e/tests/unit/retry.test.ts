@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isRetryEligible, runWithRetries, type RetryAttempt } from '../../src/run/retry.ts';
+import { isRetryEligible, retryVerdict, runWithRetries, type RetryAttempt } from '../../src/run/retry.ts';
 import type { SerializedError } from '../../src/internal/errors.ts';
 
 function error(category: SerializedError['category']): SerializedError {
@@ -18,11 +18,6 @@ describe('isRetryEligible', () => {
     expect(isRetryEligible({ status: 'failed', error: error('configuration') })).toBe(false);
     expect(isRetryEligible({ status: 'failed', error: error('internal') })).toBe(false);
     expect(isRetryEligible({ status: 'failed' })).toBe(false);
-  });
-
-  it('never treats passed or interrupted attempts as retryable', () => {
-    expect(isRetryEligible({ status: 'passed' })).toBe(false);
-    expect(isRetryEligible({ status: 'interrupted' })).toBe(false);
   });
 });
 
@@ -76,6 +71,16 @@ describe('runWithRetries', () => {
     expect(attempts).toEqual([0]);
   });
 
+  it('returns skipped when the body skipped itself, without retrying', async () => {
+    const attempts: number[] = [];
+    const status = await runWithRetries(3, liveSignal(), async (index) => {
+      attempts.push(index);
+      return { status: 'skipped' };
+    });
+    expect(status).toBe('skipped');
+    expect(attempts).toEqual([0]);
+  });
+
   it('keeps the failed verdict when an interrupt cuts its retry short', async () => {
     const status = await runWithRetries(3, liveSignal(), async (index) =>
       index === 0 ? { status: 'failed', error: error('test') } : { status: 'interrupted' },
@@ -120,11 +125,20 @@ describe('runWithRetries', () => {
     const status = await runWithRetries(3, liveSignal(), async () => undefined);
     expect(status).toBe('failed');
   });
+});
 
-  it('a pass on the final attempt still counts as flaky', async () => {
-    const status = await runWithRetries(2, liveSignal(), async (index) =>
-      index === 1 ? { status: 'passed' } : { status: 'failed', error: error('test') },
-    );
-    expect(status).toBe('flaky');
+describe('retryVerdict', () => {
+  const failed: RetryAttempt = { status: 'failed', error: error('test') };
+
+  it.each<[readonly RetryAttempt[], string]>([
+    [[], 'failed'],
+    [[{ status: 'passed' }], 'passed'],
+    [[failed, { status: 'passed' }], 'flaky'],
+    [[failed, { status: 'timed-out' }], 'timed-out'],
+    [[{ status: 'interrupted' }], 'interrupted'],
+    [[{ status: 'timed-out' }, { status: 'interrupted' }], 'timed-out'],
+    [[failed, { status: 'skipped' }], 'skipped'],
+  ])('reads %j as %s', (attempts, verdict) => {
+    expect(retryVerdict(attempts)).toBe(verdict);
   });
 });

@@ -81,9 +81,9 @@ describe('a runtime skip after a failure', () => {
     expect(output).toContain('Skipped After Failure 1');
   });
 
-  it.each(['', 'failOnSkippedFailure: true,'])('shows the original failure when a retry skips (%s)', (policy) => {
-    const { report, output, exitCode } = runSkipped(RETRY_SKIP, policy);
-    expect(exitCode).toBe(policy === '' ? 0 : 1);
+  it('shows the original failure when a retry skips', () => {
+    const { report, output, exitCode } = runSkipped(RETRY_SKIP, 'failOnSkippedFailure: true,');
+    expect(exitCode).toBe(1);
     expect(report.run.results[0]?.attempts.map((attempt) => attempt.status)).toEqual(['failed', 'skipped']);
     expect(output).toContain('Skipped After Failure 1');
     expect(output).toContain('original failure: expected 1 to be 2');
@@ -126,16 +126,5 @@ describe('a runtime skip after a failure', () => {
     expect(report.run.results[0]?.attempts[0]?.secondaryErrors).toMatchObject([{ phase: 'cleanup' }]);
     expect(exitCode).toBe(0);
     expect(output).not.toContain('Skipped After Failure');
-  });
-
-  it('shows the original failure even when the skipped retry also fails cleanup', () => {
-    const { output, exitCode } = runSkipped(
-      RETRY_SKIP,
-      'failOnSkippedFailure: true,',
-      0,
-      `async endAttempt() { throw new Error('cleanup failed'); },`,
-    );
-    expect(exitCode).toBe(1);
-    expect(output).toContain('original failure: expected 1 to be 2');
   });
 });

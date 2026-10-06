@@ -321,7 +321,11 @@ export type PointerAction =
       readonly direction: ScrollDirection;
       readonly momentum?: Momentum;
     }
-  | { readonly kind: 'swipeTo'; readonly target: ViewportPoint };
+  | {
+      readonly kind: 'swipeTo';
+      readonly target: ViewportPoint;
+      readonly durationMs?: number;
+    };
 
 /** Every pointer action kind; what an engine declares in `pointerActions`. */
 export type PointerActionKind = PointerAction['kind'];

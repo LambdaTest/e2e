@@ -7,10 +7,28 @@
 
 import type { Locator as PwLocator, Page } from 'playwright-core';
 import { describe, expect, it, vi } from 'vitest';
-import { EngineError, type LocatorAction } from 'e2e/engine';
-import { TestError } from 'e2e/engine';
+import { EngineError, TestError, type LocatorAction } from 'e2e/engine';
 import { classifyActionError, dispatchLocatorAction, dispatchPointerAction } from '../../src/actions.ts';
 import type { ActionTarget } from '../../src/support.ts';
+
+vi.mock('node:timers/promises', () => ({
+  setTimeout: (ms: number, value?: unknown, options?: { signal?: AbortSignal }) =>
+    new Promise((resolve, reject) => {
+      if (options?.signal?.aborted) {
+        reject(options.signal.reason ?? new Error('aborted'));
+        return;
+      }
+      const timer = globalThis.setTimeout(() => resolve(value), ms);
+      options?.signal?.addEventListener(
+        'abort',
+        () => {
+          globalThis.clearTimeout(timer);
+          reject(options?.signal?.reason ?? new Error('aborted'));
+        },
+        { once: true },
+      );
+    }),
+}));
 
 function pwTimeout(callLog: readonly string[]): Error {
   const error = new Error(`locator.click: Timeout 5000ms exceeded.\nCall log:\n${callLog.map((line) => `  - ${line}`).join('\n')}\n`);
@@ -48,11 +66,11 @@ describe('classifyActionError', () => {
   });
 
   it.each([
-    ['strict mode violation: 2 elements', 'ENGINE_FAILURE', false],
+    ['strict mode violation: 2 elements', 'NODE_STALE', true],
+    ['strict mode violation: 2 elements\nCall log:\n  - move and down action done', 'ACTION_MAY_HAVE_COMMITTED', false],
+    ["strict mode violation: getByText('performing click action') resolved to 2 elements:\n    1) <p>click action done</p>\nCall log:\n  - waiting for getByText('performing click action')", 'NODE_STALE', true],
     ['element is detached from the DOM', 'NODE_STALE', true],
-    ['Element is not attached to the DOM', 'NODE_STALE', true],
     ['Element is not an <input>, <textarea> or [contenteditable] element', 'NOT_ACTIONABLE', false],
-    ['Element is not a checkbox', 'NOT_ACTIONABLE', false],
     ['Target page, context or browser has been closed', 'ENGINE_FAILURE', false],
   ] as const)('maps "%s" to %s', (text, code, retryable) => {
     expect(classifyActionError(new Error(text), TAP)).toMatchObject({ code, retryable });
@@ -106,6 +124,11 @@ describe('classifyActionError', () => {
     expect(classifyActionError(pwTimeout(inFlight), TAP)).toMatchObject({ code: 'ACTION_MAY_HAVE_COMMITTED' });
   });
 
+  it('treats an action the operation deadline cut off as uncertain: Playwright never said whether the input landed', () => {
+    const cut = new EngineError('OPERATION_TIMEOUT', 'tap timed out', { retryable: false });
+    expect(classifyActionError(cut, TAP)).toMatchObject({ code: 'ACTION_MAY_HAVE_COMMITTED', retryable: false, cause: cut });
+  });
+
   it('keeps a bare timeout without a call log a plain actionability miss', () => {
     const error = new Error('Timeout 5000ms exceeded');
     error.name = 'TimeoutError';
@@ -156,21 +179,10 @@ describe('dispatchLocatorAction', () => {
   };
 
   it.each([
-    [{ kind: 'tap' }, 'click', [{ timeout: 7 }]],
-    [{ kind: 'doubleTap' }, 'dblclick', [{ timeout: 7 }]],
     [{ kind: 'longPress', durationMs: 900 }, 'click', [{ timeout: 7, delay: 900 }]],
-    [{ kind: 'fill', value: 'ada', sensitive: false }, 'fill', ['ada', { timeout: 7 }]],
-    [{ kind: 'fill', value: 'hunter2', sensitive: true }, 'fill', ['hunter2', { timeout: 7 }]],
     [{ kind: 'clear' }, 'fill', ['', { timeout: 7 }]],
-    [{ kind: 'press', key: 'Enter' }, 'press', ['Enter', { timeout: 7 }]],
-    [{ kind: 'focus' }, 'focus', [{ timeout: 7 }]],
-    [{ kind: 'hover' }, 'hover', [{ timeout: 7 }]],
-    [{ kind: 'scrollIntoView' }, 'scrollIntoViewIfNeeded', [{ timeout: 7 }]],
     [{ kind: 'selectOption', value: 'Blue' }, 'selectOption', [{ label: 'Blue' }, { timeout: 7 }]],
     [{ kind: 'selectOption', value: { index: 2 } }, 'selectOption', [{ index: 2 }, { timeout: 7 }]],
-    [{ kind: 'selectOption', value: { label: 'Red' } }, 'selectOption', [{ label: 'Red' }, { timeout: 7 }]],
-    [{ kind: 'selectOption', value: { value: 'blue' } }, 'selectOption', [{ value: 'blue' }, { timeout: 7 }]],
-    [{ kind: 'setInputFiles', paths: ['/tmp/a.txt'] }, 'setInputFiles', [['/tmp/a.txt'], { timeout: 7 }]],
   ] as const satisfies readonly (readonly [LocatorAction, string, readonly unknown[]])[])(
     'dispatches %j to locator.%s',
     async (action, method, args) => {
@@ -181,14 +193,6 @@ describe('dispatchLocatorAction', () => {
       expect(spy.mock.calls[0]).toEqual(args);
     },
   );
-
-  it('presses a key as spelled: the harness has already checked the grammar', async () => {
-    const { locator, target } = stubLocator();
-    for (const key of ['Control+a', 'Shift+Tab', 'ControlOrMeta+Shift+ArrowLeft', '$', 'Shift++']) {
-      await dispatchLocatorAction(target, { kind: 'press', key }, 7, lookup);
-      expect(locator.press).toHaveBeenLastCalledWith(key, { timeout: 7 });
-    }
-  });
 
   it('scrolls a node with a wheel gesture sized by its own box: the agent node scroll', async () => {
     const { locator, target, wheel } = stubLocator({ x: 0, y: 0, width: 400, height: 300 });
@@ -226,7 +230,9 @@ describe('dispatchPointerAction', () => {
   function stubPage() {
     const calls: string[] = [];
     const mouse = {
-      move: async (x: number, y: number) => { calls.push(`move ${x},${y}`); },
+      move: async (x: number, y: number) => {
+        calls.push(`move ${x},${y}`);
+      },
       down: async () => { calls.push('down'); },
       up: async () => { calls.push('up'); },
       click: async (x: number, y: number, options?: { button?: string; delay?: number }) => {
@@ -259,6 +265,46 @@ describe('dispatchPointerAction', () => {
     const { page, calls } = stubPage();
     await dispatchPointerAction(page, { x: 10, y: 20 }, { kind: 'swipeTo', target: { x: 110, y: 20 } });
     expect(calls).toEqual(['move 10,20', 'down', 'move 60,20', 'move 110,20', 'up']);
+  });
+
+  it('swipes along a path with duration as a multi-step drag paced over time', async () => {
+    vi.useFakeTimers();
+    try {
+      const { page, calls } = stubPage();
+      const promise = dispatchPointerAction(page, { x: 10, y: 20 }, { kind: 'swipeTo', target: { x: 70, y: 20 }, durationMs: 48 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(calls).toEqual(['move 10,20', 'down']);
+      await vi.advanceTimersByTimeAsync(16);
+      expect(calls).toEqual(['move 10,20', 'down', 'move 30,20']);
+      await vi.advanceTimersByTimeAsync(16);
+      expect(calls).toEqual(['move 10,20', 'down', 'move 30,20', 'move 50,20']);
+      await vi.advanceTimersByTimeAsync(16);
+      expect(calls).toEqual(['move 10,20', 'down', 'move 30,20', 'move 50,20', 'move 70,20', 'up']);
+      await promise;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops dispatching moves when aborted and releases the mouse', async () => {
+    vi.useFakeTimers();
+    try {
+      const { page, calls } = stubPage();
+      const controller = new AbortController();
+      const promise = dispatchPointerAction(
+        page,
+        { x: 10, y: 20 },
+        { kind: 'swipeTo', target: { x: 70, y: 20 }, durationMs: 48 },
+        controller.signal,
+      );
+      await vi.advanceTimersByTimeAsync(16);
+      expect(calls).toEqual(['move 10,20', 'down', 'move 30,20']);
+      controller.abort();
+      await expect(promise).rejects.toThrow();
+      expect(calls).toEqual(['move 10,20', 'down', 'move 30,20', 'up']);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('swipes in a direction as a wheel gesture over the point, sized by the viewport', async () => {

@@ -69,6 +69,15 @@ describe('trace-1 entry', () => {
     expect(entry.payload.startPath).toBe('/settings');
   });
 
+  it('round-trips an empty typed value: clearing a field is a recordable action', () => {
+    const target = { role: 'textbox', name: 'Name' };
+    const actions: RecordedAction[] = [
+      { name: 'type', summary: 'clear textbox', target, value: '' },
+      { name: 'typeText', summary: 'clear the focused field', value: '', replace: true },
+    ];
+    expect(entryOf(trace({ actions })).payload.actions).toEqual(actions);
+  });
+
   it('round-trips the postcondition: end path and end anchors', () => {
     const endAnchors = [
       { role: 'status', name: 'Marker', text: 'saved' },
@@ -112,6 +121,7 @@ describe('trace-1 entry', () => {
     ['unknown action name', withPayload({ actions: [{ ...tap, name: 'click' }] })],
     ['tap without a target', withPayload({ actions: [{ name: 'tap', summary: 'tap' }] })],
     ['type without a value', withPayload({ actions: [{ ...tap, name: 'type' }] })],
+    ['select with an empty value', withPayload({ actions: [{ name: 'select', summary: 's', target: { role: 'x' }, value: '' }] })],
     [
       'oversized input value',
       withPayload({
@@ -161,24 +171,13 @@ describe('decideTraceReplay', () => {
   it('enforces the start-path precondition when the trace does not open with navigate', () => {
     const entry = entryOf(trace());
     expect(decideTraceReplay(entry, '/settings').action).toBe('replay');
+    expect(decideTraceReplay(entryOf(trace({ startPath: '/orders/42' })), '/orders/43917#top').action).toBe('replay');
     for (const currentPath of ['/other', undefined]) {
       expect(decideTraceReplay(entry, currentPath)).toEqual({
         action: 'miss',
         reason: 'wrong-context',
       });
     }
-  });
-
-  it('compares the start path as a route: the query is part of it, its minted values and the fragment are not', () => {
-    const entry = entryOf(trace());
-    expect(decideTraceReplay(entry, '/settings#billing').action).toBe('replay');
-    expect(decideTraceReplay(entryOf(trace({ startPath: '/settings?tab=2' })), '/settings?tab=7').action).toBe('replay');
-    expect(decideTraceReplay(entryOf(trace({ startPath: '/settings?tab=notes' })), '/settings').action).toBe('miss');
-    expect(decideTraceReplay(entry, '/settings?utm_source=mail').action).toBe('miss');
-    expect(decideTraceReplay(entry, '/settings/billing')).toEqual({
-      action: 'miss',
-      reason: 'wrong-context',
-    });
   });
 
   it('replays a navigate-opening trace from anywhere', () => {

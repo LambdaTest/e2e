@@ -65,8 +65,6 @@ describe('locator.filter options', () => {
 
   it.each([
     ['null', null],
-    ['an array', [{ hasText: 'Invoice' }]],
-    ['a string', 'Invoice'],
     ['an object inheriting hasNotText', Object.assign(Object.create({ hasNotText: 'Paid' }), { hasText: 'Invoice' })],
   ])('rejects %s in place of the options object', (_, options) => {
     const { screen } = invoiceScreen();

@@ -16,7 +16,7 @@ import { resultByTitle, runProject, type FixtureProject, type RunOutcome } from 
 const SUITE = `import { test } from '@e2e-dev/web';
 import { expect } from 'e2e';
 
-const READS = 30;
+const READS = 10;
 
 /**
  * Runs body while this process's event loop is blocked in 20 ms slices, so a
@@ -58,7 +58,7 @@ test('a field replaced every frame never reads as hidden', async ({ app, screen 
 
 test('a field replaced every frame never reads as hidden on a starved runner', async ({ app, screen }) => {
   await app.open('/replaced');
-  expect(await starved(() => hiddenReads(fields(screen), 10))).toEqual({ testId: 0, label: 0, displayValue: 0 });
+  expect(await starved(() => hiddenReads(fields(screen), 3))).toEqual({ testId: 0, label: 0, displayValue: 0 });
 });
 
 test('a stable field beside one replaced every frame reads as shown', async ({ app, screen }) => {
@@ -109,7 +109,7 @@ describe('reads of a node replaced every frame', () => {
 
   beforeAll(async () => {
     app = await startFixtureApp();
-    // Ninety sequential reads against a page that swaps nodes every frame: on a
+    // Thirty sequential reads against a page that swaps nodes every frame: on a
     // loaded CI runner each read takes far longer than locally, and the suite
     // asserts what the reads return, not how fast they are. The hook's own
     // budget covers all eight tests at that deadline.

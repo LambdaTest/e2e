@@ -1,6 +1,6 @@
 /** Runner-owned agent error classification. */
 
-import { classifyError, E2EError, type ErrorCategory } from '../internal/errors.ts';
+import { classifyError, E2EError, isE2EError, type ErrorCategory } from '../internal/errors.ts';
 import type { AgentErrorCode } from '../types.ts';
 
 /**
@@ -81,7 +81,7 @@ const MODEL_UNREACHABLE_CODES: ReadonlySet<string> = new Set(
  * model was shown may be what went wrong.
  */
 export function isModelUnreachable(error: unknown): boolean {
-  if (!(error instanceof E2EError) && !isAgentError(error)) return false;
+  if (!isE2EError(error)) return false;
   return MODEL_UNREACHABLE_CODES.has(error.code);
 }
 
@@ -127,7 +127,7 @@ const AGENT_CODES = new Set<string>(Object.keys(CATEGORY_BY_CODE));
  */
 export function toAgentError(cause: unknown): AgentError {
   if (isAgentError(cause)) return cause;
-  const classified = cause instanceof E2EError ? cause : classifyError(cause);
+  const classified = classifyError(cause);
   if (AGENT_CODES.has(classified.code)) {
     return new AgentError(classified.code as AgentErrorCode, classified.message, { cause });
   }

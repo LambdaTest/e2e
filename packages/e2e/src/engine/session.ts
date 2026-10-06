@@ -15,9 +15,8 @@
 import {
   asEngineError,
   ConfigurationError,
-  E2EError,
   errorMessage,
-  isForeignE2EError,
+  isE2EError,
   TestError,
 } from '../internal/errors.ts';
 import { requireKey } from '../internal/keys.ts';
@@ -73,7 +72,7 @@ function countSecure(node: SemanticNode): number {
  * engine failing outside its contract, reported as infrastructure.
  */
 function normalize(cause: unknown, label: string): never {
-  if (cause instanceof E2EError || isForeignE2EError(cause) || asEngineError(cause) !== undefined) {
+  if (isE2EError(cause) || asEngineError(cause) !== undefined) {
     throw cause;
   }
   throw new EngineError('ENGINE_FAILURE', `${label} failed: ${errorMessage(cause)}`, {
