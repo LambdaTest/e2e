@@ -33,7 +33,7 @@ describe('e2e mcp stdout backpressure', { timeout: 60_000 }, () => {
 
   beforeAll(() => {
     project = createProject({ 'e2e.config.ts': CONFIG });
-    server = spawn(process.execPath, [CLI, 'mcp', '--headless'], {
+    server = spawn(process.execPath, [CLI, 'mcp'], {
       cwd: project.dir,
       env: { ...process.env, CI: '' },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -66,7 +66,10 @@ describe('e2e mcp stdout backpressure', { timeout: 60_000 }, () => {
     for (let index = 0; index < READS; index += 1) {
       send({ jsonrpc: '2.0', id: 100 + index, method: 'resources/read', params: { uri: 'e2e://guide' } });
     }
-    await sleep(2_000);
+    await expect
+      .poll(() => server.exitCode !== null || server.stdout.readableLength >= server.stdout.readableHighWaterMark, { timeout: 10_000, interval: 5 })
+      .toBe(true);
+    await sleep(250);
     expect(server.exitCode, `server exited early:\n${stderr}`).toBeNull();
 
     let output = '';

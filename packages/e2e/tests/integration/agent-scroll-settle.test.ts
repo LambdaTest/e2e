@@ -63,7 +63,6 @@ describe('the look after scrolling to text', () => {
       expect(executorCalls).toBe(1);
       const replay = resultByTitle(replayed, 'reaches and taps the row').attempts[0]!.steps.find((step) => step.api === 'agent.act');
       expect(replay?.cache).toMatchObject({ mode: 'self-finalized', replayedActions: 2 });
-      console.info(`scroll-to-text ${String(pages)} pages: ${String(replay?.durationMs)} ms replay, ${String(afterScroll)} captures after the live action`);
       expect(afterScroll).toBe(2);
       if (pages > 0) expect(beforeTap).toEqual([4, 4]);
     } finally {

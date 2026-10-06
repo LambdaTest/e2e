@@ -2,7 +2,7 @@
 
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { ConfigurationError, InfrastructureError, isForeignE2EError } from '../internal/errors.ts';
+import { ConfigurationError, InfrastructureError, isE2EError } from '../internal/errors.ts';
 import type { E2EConfig } from '../types.ts';
 import { explainModuleError } from './diagnose.ts';
 import { freshModuleURL, registerLoader } from './esm-hooks.ts';
@@ -127,10 +127,10 @@ export async function loadConfigModule(configPath: string, options: ConfigLoadOp
     // with its own code; only a failed import is a load failure.
     // So is the loader's own failure (oxc's native binding missing): the project's config is not at fault.
     if (cause instanceof ConfigurationError || cause instanceof InfrastructureError) throw cause;
-    if (isForeignE2EError(cause) && cause.category === 'configuration') {
+    if (isE2EError(cause) && cause.category === 'configuration') {
       throw new ConfigurationError(cause.code, cause.message, { cause });
     }
-    if (isForeignE2EError(cause) && cause.category === 'infrastructure') {
+    if (isE2EError(cause) && cause.category === 'infrastructure') {
       throw new InfrastructureError(cause.code, cause.message, { cause });
     }
     throw new ConfigurationError(

@@ -9,12 +9,11 @@
  * still passes.
  */
 
-import { readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { RunOutcome } from '../../src/run/runner.ts';
 import { startFixtureApp, type FixtureApp } from '../helpers/fixture-app.ts';
-import { createProject, resultByTitle, runExisting, type FixtureProject } from '../helpers/run-project.ts';
+import { contentsUnder, createProject, resultByTitle, runExisting, type FixtureProject } from '../helpers/run-project.ts';
 
 const TOKEN = 'Tok-9f3aC0DeB1e7';
 const NOTE = 'first line 4417\nsecond line Qx';
@@ -49,14 +48,6 @@ test('matches the transformed text', async ({ app, screen }) => {
   await expect(screen.getByTestId('note-echo')).toHaveText(${JSON.stringify(NOTE.replaceAll('\n', ' '))});
 });
 `;
-
-/** Every regular file under `dir`, recursively. */
-function filesUnder(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    const file = path.join(dir, name);
-    return statSync(file).isDirectory() ? filesUnder(file) : [file];
-  });
-}
 
 describe('secrets shown transformed', () => {
   let app: FixtureApp;
@@ -101,12 +92,14 @@ describe('secrets shown transformed', () => {
     for (const form of FORMS) expect(text).not.toContain(form);
   });
 
-  it.each(['plain', 'upper', 'lower', 'note-echo'])('fails on the %s echo with the received text redacted', (id) => {
-    const result = resultByTitle(outcome, `fails on the ${id} echo`);
-    expect(result.status).toBe('failed');
-    const message = result.attempts[0]!.error!.message;
-    expect(message).toContain(id === 'note-echo' ? '<secret:note>' : '<secret:token>');
-    for (const form of FORMS) expect(message).not.toContain(form);
+  it('fails on each echo with the received text redacted', () => {
+    for (const id of ['plain', 'upper', 'lower', 'note-echo']) {
+      const result = resultByTitle(outcome, `fails on the ${id} echo`);
+      expect(result.status, id).toBe('failed');
+      const message = result.attempts[0]!.error!.message;
+      expect(message).toContain(id === 'note-echo' ? '<secret:note>' : '<secret:token>');
+      for (const form of FORMS) expect(message).not.toContain(form);
+    }
   });
 
   it('matches the transformed text as the page shows it', () => {
@@ -116,10 +109,10 @@ describe('secrets shown transformed', () => {
   it('leaves no form of either value in the report or any file the reporters write', () => {
     const report = JSON.stringify(outcome.report);
     for (const form of FORMS) expect(report).not.toContain(form);
-    const files = filesUnder(path.join(project.dir, '.e2e'));
-    expect(files.some((file) => file.endsWith('.md'))).toBe(true);
-    for (const file of files) {
-      const text = readFileSync(file, 'utf8');
+    const contents = contentsUnder(path.join(project.dir, '.e2e'));
+    expect(contents.some(([file]) => file.endsWith('.md'))).toBe(true);
+    expect(contents.some(([file]) => file.includes('.zip!'))).toBe(true);
+    for (const [file, text] of contents) {
       for (const form of FORMS) expect(text, file).not.toContain(form);
     }
   });

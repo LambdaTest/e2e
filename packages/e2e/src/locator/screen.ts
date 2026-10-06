@@ -43,7 +43,7 @@ import {
   testIdQuery,
   textQuery,
 } from './expression.ts';
-import { type Deadline, POLL_INTERVAL_MS, pollCondition, sleep } from '../internal/time.ts';
+import { cutOffAtDeadline, type Deadline, POLL_INTERVAL_MS, pollCondition, sleep } from '../internal/time.ts';
 
 export interface SecretResolver {
   /**
@@ -209,14 +209,23 @@ class ScreenImpl implements Screen {
 
   async swipe(options: SwipeOptions | SwipePathOptions): Promise<void> {
     if (isSwipePath(options)) {
-      rejectUnknownOptions('swipe', options, ['from', 'to']);
+      rejectUnknownOptions('swipe', options, ['from', 'to', 'duration']);
       const from = requirePoint(options.from, 'swipe from');
       const to = requirePoint(options.to, 'swipe to');
+      const durationMs = validateSwipeDuration(options.duration);
       await this.context.steps.run(
         'screen',
         'screen.swipe',
         `${describePoint(from)} → ${describePoint(to)}`,
-        () => this.context.engine.performAt(from, { kind: 'swipeTo', target: to }),
+        () =>
+          this.context.engine.performAt(
+            from,
+            obj({
+              kind: 'swipeTo' as const,
+              target: to,
+              durationMs,
+            }),
+          ),
       );
       return;
     }
@@ -253,8 +262,17 @@ class ScreenImpl implements Screen {
           details: locatorDetails(internals.expression, Date.now() - startedMs),
           ...(cause === undefined ? {} : { cause }),
         });
+      let sampled = false;
       for (;;) {
-        const { node } = await engine.tryRead(internals.expression, deadline);
+        const startedWithMs = deadline.remaining();
+        let node: SemanticNode | null;
+        try {
+          ({ node } = await engine.tryRead(internals.expression, deadline));
+        } catch (cause) {
+          if (sampled && cutOffAtDeadline(cause, startedWithMs)) throw notVisible(cause);
+          throw cause;
+        }
+        sampled = true;
         if (isNodeVisible(node)) return;
         if (deadline.expired()) throw notVisible();
         try {
@@ -575,9 +593,10 @@ class LocatorImpl extends ScreenImpl implements Locator {
           const { node } = await engine.tryRead(this.expression, deadline, ABSENCE_STATES.has(state) ? 'empty' : 'wait');
           return inWaitForState(node, state);
         },
-        onTimeout: () =>
+        onTimeout: (cause) =>
           new TestError('LOCATOR_NOT_FOUND', `locator did not become ${state}: ${this.label}`, {
             details: locatorDetails(this.expression, Date.now() - startedMs),
+            ...(cause === undefined ? {} : { cause }),
           }),
       });
     }, { verifies: true });
@@ -678,6 +697,18 @@ function validateLongPress(durationMs: number | undefined): number | undefined {
     );
   }
   return durationMs;
+}
+
+/** Validates the shared swipe duration bound; none named leaves the gesture to the engine's default. */
+function validateSwipeDuration(duration: number | undefined): number | undefined {
+  if (duration === undefined) return undefined;
+  if (!Number.isInteger(duration) || duration < 16 || duration > 10_000) {
+    throw new TestError(
+      'INVALID_ARGUMENT',
+      `swipe duration must be an integer from 16 through 10000, got ${String(duration)}`,
+    );
+  }
+  return duration;
 }
 
 /**

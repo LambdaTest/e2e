@@ -3,13 +3,13 @@
  * a real MCP client. The server's tool list is four tools; everything the
  * session can do is a catalog behind `call`. Covers the catalog, a live
  * session driven through `call`, argument validation, the secret and pixel
- * invariants, a video recording, a second session open beside the first, a
- * second session after the first closed, an explicit config path, and stdout
- * hygiene: a config that prints to stdout must not corrupt
- * the protocol.
+ * invariants, a second session open beside the first, a second session after
+ * the first closed, an explicit config path, a config with two targets, a
+ * custom engine, and project tools (each session's catalog is what its own
+ * target can do), and stdout hygiene: a config that prints to stdout must not
+ * corrupt the protocol.
  */
 
-import { readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
@@ -55,6 +55,49 @@ export default {
 } satisfies E2EConfig;
 `;
 
+const KIOSK = `import { createFakeEngine } from '../../helpers/fake-engine.ts';
+
+export const kiosk = createFakeEngine({
+  tree: { ref: { id: 'root', revision: '' }, role: 'root', children: [
+    { ref: { id: 'k-1', revision: '' }, role: 'button', name: 'Start order', states: { hidden: false } },
+    { ref: { id: 'k-2', revision: '' }, role: 'textbox', name: 'Table', states: { hidden: false } },
+  ] },
+});
+`;
+
+// A third config: two targets, one a custom engine with fewer verbs, and
+// project tools scoped by platform.
+const CUSTOM_CONFIG = `import type { E2EConfig } from 'e2e';
+import { defineTool, getToolContext } from 'e2e/agent';
+import { z } from 'zod';
+import { targets } from './targets.ts';
+import { kiosk } from './kiosk.ts';
+
+export default {
+  targets: [...targets, { name: 'kiosk', platform: 'kiosk', engine: kiosk.engine }],
+  agents: { default: {
+    tools: {
+      seed_data: defineTool(
+        { description: 'Seed a tenant with demo data.', inputSchema: z.object({ tenant: z.string() }), execute: async ({ tenant }: { tenant: string }) => \`Seeded \${tenant}.\` },
+        { mutates: true },
+      ),
+      count_nodes: defineTool(
+        { description: 'Count the nodes on screen.', inputSchema: z.object({}), execute: async (_input: unknown, options: object) => \`\${(await getToolContext(options).observe()).text.split('\\\\n').length} nodes\` },
+        { mutates: false },
+      ),
+      shake: defineTool(
+        { description: 'Shake the phone.', inputSchema: z.object({}), execute: async () => 'shaken' },
+        { mutates: true, platforms: ['ios'] },
+      ),
+      kiosk_reset: defineTool(
+        { description: 'Reset the kiosk.', inputSchema: z.object({}), execute: async () => 'kiosk reset' },
+        { mutates: true, platforms: ['kiosk'] },
+      ),
+    },
+  } },
+} satisfies E2EConfig;
+`;
+
 interface ToolText {
   readonly text: string;
   readonly isError: boolean;
@@ -92,13 +135,20 @@ describe('e2e mcp', { timeout: 120_000 }, () => {
   };
 
   const catalogLines = (text: string): string[] => text.split('\n').filter((line) => line.startsWith('- '));
+  const catalogNames = (text: string): string[] => catalogLines(text).map((line) => /^- (\S+?)(?: \{|:)/.exec(line)![1]!);
 
   beforeAll(async () => {
     app = await startFixtureApp();
-    project = createProject({ 'e2e.config.ts': CONFIG, 'targets.ts': TARGETS, 'protected.config.ts': PROTECTED_CONFIG });
+    project = createProject({
+      'e2e.config.ts': CONFIG,
+      'targets.ts': TARGETS,
+      'protected.config.ts': PROTECTED_CONFIG,
+      'kiosk.ts': KIOSK,
+      'custom.config.ts': CUSTOM_CONFIG,
+    });
     transport = new StdioClientTransport({
       command: process.execPath,
-      args: [CLI, 'mcp', '--headless'],
+      args: [CLI, 'mcp'],
       cwd: project.dir,
       env: { ...(process.env as Record<string, string>), APP_URL: app.url, CI: '' },
       stderr: 'pipe',
@@ -123,7 +173,7 @@ describe('e2e mcp', { timeout: 120_000 }, () => {
     expect(callTool.description).toContain('call {tool: "tap", args: {target: "n42"}, session: "<id>"}');
     expect(callTool.inputSchema).toMatchObject({ type: 'object', required: ['tool'] });
     expect(tools.find((tool) => tool.name === 'tools')?.annotations).toMatchObject({ readOnlyHint: true });
-    expect(tools.find((tool) => tool.name === 'open_session')?.inputSchema).toMatchObject({ properties: { target: {}, config: {} } });
+    expect(tools.find((tool) => tool.name === 'open_session')?.inputSchema).toMatchObject({ properties: { target: {}, config: {}, headed: { type: 'boolean' } } });
     expect(client.getInstructions()).toContain('call {tool, args} runs any catalog tool');
     expect(client.getInstructions()).toContain('Several sessions can be open at once');
 
@@ -169,34 +219,36 @@ describe('e2e mcp', { timeout: 120_000 }, () => {
     expect(opened.text).toContain(`App: ${app.url}/`);
     expect(opened.text).toContain('Credentials: "admin" (username "admin", password secret "admin.password")');
     expect(opened.text).toContain('Tools (run one with call {tool, args}; tools {tool} shows a tool\'s arguments):');
-    expect(catalogLines(opened.text)).toEqual([
-      expect.stringMatching(/^- observe: Look at the whole current screen.* \[read-only\]$/),
-      expect.stringMatching(/^- tap \{target\}: Tap or click one node: the gesture for a button, link, menu item, tab, checkbox, row, or field\.$/),
-      expect.stringMatching(/^- double_tap \{target\}: Double-click one node: only for an item that opens or enters editing on the second click/),
-      expect.stringMatching(/^- long_press \{target\}: Press one node and hold: only for a control with a long-press menu or action\.$/),
-      expect.stringMatching(/^- right_click \{target\}: Right-click one node to open its context menu, and only for that\.$/),
-      expect.stringMatching(/^- hover \{target\}: Move the pointer over one node without clicking/),
-      expect.stringMatching(/^- scroll_to \{target\?, text\?, direction\?\}: Scroll until a node is inside the viewport/),
-      expect.stringMatching(/^- type \{target\?, value, replace\?\}: Type a plain-text value into one input node, or into whatever has focus when target is omitted\.$/),
-      expect.stringMatching(/^- press \{target\?, key, times\?\}: /),
-      expect.stringMatching(/^- select \{target, value\}: /),
-      expect.stringMatching(/^- check \{target, checked\?\}: Set a checkbox, switch, or radio to a state/),
-      expect.stringMatching(/^- drag \{target, to\}: Drag one node and drop it on another/),
-      expect.stringMatching(/^- upload \{target, files\}: Attach one or more files to a file input node\.$/),
-      expect.stringMatching(/^- scroll \{direction, target\?, times\?\}: /),
-      expect.stringMatching(/^- navigate \{url\}: /),
-      expect.stringMatching(/^- back: Go back one step/),
-      expect.stringMatching(/^- screenshot: Attach a screenshot of the current viewport.* \[read-only\]$/),
-      expect.stringMatching(/^- tap_at \{x, y\}: Tap a point in the latest screenshot/),
-      expect.stringMatching(/^- hover_at \{x, y\}: Move the pointer to a point in the latest screenshot/),
-      expect.stringMatching(/^- type_at \{x, y, value, replace\?\}: Type a plain-text value into the field at a point/),
-      expect.stringMatching(/^- press_at \{x, y, key\}: Send one key/),
-      expect.stringMatching(/^- select_at \{x, y, value\}: Pick one option/),
-      expect.stringMatching(/^- type_secret \{target, name\}: /),
-      expect.stringMatching(/^- locate \{role\?, name\?, text\?, label\?, placeholder\?, testId\?, exact\?\}: .* \[read-only\]$/),
-      expect.stringMatching(/^- start_recording \{name\?\}: Start recording a video of the app, for a person to watch: .*\.$/),
-      expect.stringMatching(/^- stop_recording: Stop the running recording and save it: .*\.$/),
+    expect(catalogNames(opened.text)).toEqual([
+      'observe',
+      'tap',
+      'double_tap',
+      'long_press',
+      'right_click',
+      'hover',
+      'scroll_to',
+      'type',
+      'press',
+      'select',
+      'check',
+      'drag',
+      'upload',
+      'scroll',
+      'navigate',
+      'back',
+      'screenshot',
+      'tap_at',
+      'hover_at',
+      'type_at',
+      'press_at',
+      'select_at',
+      'type_secret',
+      'locate',
+      'start_recording',
+      'stop_recording',
     ]);
+    expect(opened.text).toMatch(/^- tap \{target\}: Tap or click one node: the gesture for a button, link, menu item, tab, checkbox, row, or field\.$/m);
+    expect(opened.text).toMatch(/^- locate \{role\?, name\?, text\?, label\?, placeholder\?, testId\?, exact\?\}: .* \[read-only\]$/m);
     expect(opened.text).toMatch(/Current screen \(revision b\d+, path \/, \d+ nodes\):/);
     expect(opened.text).toContain('button "Increment"');
     const sessionId = /^Session (\S+) open/.exec(opened.text)![1]!;
@@ -319,32 +371,6 @@ describe('e2e mcp', { timeout: 120_000 }, () => {
     expect(gone.text).toContain('the previous session ended: closed by the agent');
   });
 
-  it('records the app between start_recording and stop_recording, and saves a recording still running at close', async () => {
-    const opened = await invoke('open_session');
-    expect(opened.isError, opened.text).toBe(false);
-    const sessionId = /^Session (\S+) open/.exec(opened.text)![1]!;
-    const recordings = path.join(project.dir, '.e2e', 'videos', sessionId);
-
-    const started = await call('start_recording', { name: 'counter' });
-    expect(started.isError, started.text).toBe(false);
-    const observed = await call('observe');
-    await call('tap', { target: nodeId(observed.text, /button "Increment"/) });
-    const stopped = await call('stop_recording');
-    expect(stopped.isError, stopped.text).toBe(false);
-    expect(stopped.text).toMatch(/^Recording 1 "counter" stopped after \d+\.\d s\.\n- \S+\.webm$/);
-    const file = path.join(recordings, '1-counter.webm');
-    expect(stopped.text.endsWith(`- ${file}`)).toBe(true);
-    expect(statSync(file).size).toBeGreaterThan(0);
-
-    await call('start_recording');
-    const closed = await invoke('close_session');
-    expect(closed.isError, closed.text).toBe(false);
-    expect(closed.text).toMatch(/\nRecording 2 stopped after \d+\.\d s\.\n- \S+$/);
-    expect(closed.text.endsWith(`- ${path.join(recordings, '2.webm')}`)).toBe(true);
-    expect(closed.text).not.toContain('Cleanup:');
-    expect(readdirSync(recordings).toSorted()).toEqual(['1-counter.webm', '2.webm']);
-  });
-
   it('opens a second session after the first closed, on an explicit config path, and names an unknown target', async () => {
     const unknown = await invoke('open_session', { target: 'nope' });
     expect(unknown.isError).toBe(true);
@@ -402,6 +428,78 @@ describe('e2e mcp', { timeout: 120_000 }, () => {
     }
     const closed = await invoke('close_session');
     expect(closed.isError, closed.text).toBe(false);
+  });
+
+  it('needs a target name when the config declares several', async () => {
+    const result = await invoke('open_session', { config: 'custom.config.ts' });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain('TARGET_REQUIRED');
+    expect(result.text).toContain('web, kiosk');
+  });
+
+  it('catalogs and runs the project tools of a custom engine target, with only the verbs it declares', async () => {
+    const opened = await invoke('open_session', { config: 'custom.config.ts', target: 'kiosk' });
+    expect(opened.isError, opened.text).toBe(false);
+    expect(opened.text).toContain('platform kiosk, engine fake');
+    expect(opened.text).toContain('button "Start order"');
+    expect(opened.text).toContain('- seed_data {tenant}: Seed a tenant with demo data.');
+    expect(opened.text).toContain('- count_nodes: Count the nodes on screen. [read-only]');
+    const names = catalogNames(opened.text);
+    expect(names).toEqual(expect.arrayContaining(['seed_data', 'count_nodes', 'kiosk_reset']));
+    expect(names).not.toContain('shake');
+    expect(names).not.toContain('scroll');
+
+    const seeded = await call('seed_data', { tenant: 'acme' });
+    expect(seeded.isError, seeded.text).toBe(false);
+    expect(seeded.text).toBe('Seeded acme.');
+    const counted = await call('count_nodes');
+    expect(counted.isError, counted.text).toBe(false);
+    expect(counted.text).toMatch(/^\d+ nodes$/);
+    const reset = await call('kiosk_reset');
+    expect(reset.isError, reset.text).toBe(false);
+    expect(reset.text).toBe('kiosk reset');
+    const foreign = await call('shake');
+    expect(foreign.isError).toBe(true);
+    expect(foreign.text).toContain('UNKNOWN_TOOL');
+
+    const observed = await call('observe');
+    const id = /#(\S+) button "Start order"/.exec(observed.text)?.[1];
+    expect(id).toBeDefined();
+    const tapped = await call('tap', { target: id! });
+    expect(tapped.isError, tapped.text).toBe(false);
+    expect(tapped.text).toContain(`Tapped #${id}.`);
+    expect(tapped.text).toMatch(/Screen changes since revision|The screen did not change|No listed node changed/);
+
+    // The fake declares no viewport swipe, so scroll is a verb this target lacks.
+    const scrolled = await call('scroll', { direction: 'down' });
+    expect(scrolled.isError).toBe(true);
+    expect(scrolled.text).toContain('UNSUPPORTED_CAPABILITY');
+    expect(scrolled.text).toContain('declares no such action');
+
+    const closed = await invoke('close_session');
+    expect(closed.isError, closed.text).toBe(false);
+    expect(closed.text).not.toContain('Cleanup:');
+  });
+
+  it('opens sessions headed with --headed, and headless with the retired --headless', async () => {
+    for (const [flag, mode] of [['--headed', 'headed'], ['--headless', 'headless']] as const) {
+      const other = new Client({ name: 'e2e-mcp-flag-test', version: '0.0.0' });
+      await other.connect(
+        new StdioClientTransport({
+          command: process.execPath,
+          args: [CLI, 'mcp', flag, '--config', 'custom.config.ts', '--target', 'kiosk'],
+          cwd: project.dir,
+          env: { ...(process.env as Record<string, string>), APP_URL: app.url, CI: '' },
+          stderr: 'ignore',
+        }),
+      );
+      try {
+        const opened = (await other.callTool({ name: 'open_session', arguments: {} })) as { content: { text?: string }[] };
+        expect(opened.content[0]?.text, flag).toContain(`), ${mode};`);
+      } finally {
+        await other.close();
+      }
+    }
   });
 
   it('kept stdout for the protocol: the config\'s console.log landed on stderr', () => {

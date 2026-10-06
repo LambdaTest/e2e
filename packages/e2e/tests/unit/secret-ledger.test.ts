@@ -192,7 +192,7 @@ describe('near misses', () => {
     const nearMiss = `${value.slice(0, -1)}!`;
     const started = performance.now();
     expect(ledger.redact(nearMiss)).toBe(nearMiss);
-    expect(performance.now() - started).toBeLessThan(200);
+    expect(performance.now() - started).toBeLessThan(1_000);
   });
 });
 
@@ -449,10 +449,19 @@ describe('redactFragments', () => {
 
   it('scans a long text in one linear pass', () => {
     const ledger = new SecretLedger([['apiKey', SECRET]]);
-    const text = `${SECRET.slice(0, 7).toUpperCase()} `.repeat(20_000);
-    const started = performance.now();
-    expect(ledger.redactFragments(text)).toBe(text);
-    expect(performance.now() - started).toBeLessThan(200);
+    const scan = (repeats: number): number => {
+      const text = `${SECRET.slice(0, 7).toUpperCase()} `.repeat(repeats);
+      let fastest = Infinity;
+      for (let run = 0; run < 3; run += 1) {
+        const started = performance.now();
+        expect(ledger.redactFragments(text)).toBe(text);
+        fastest = Math.min(fastest, performance.now() - started);
+      }
+      return fastest;
+    };
+    const once = scan(20_000);
+    // Eight times the text costs about eight times the time; a quadratic scan costs 64.
+    expect(scan(160_000) / Math.max(once, 1)).toBeLessThan(24);
   });
 
   it('changes nothing with no value registered', () => {

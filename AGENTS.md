@@ -66,6 +66,14 @@ suites that consume the built packages the way a user would.
   `e2e/engine` only: the semantics every engine must reproduce
   (error taxonomy, text and URL matching, assertion polling, JSON-value rules)
   are exported there, and there is no `e2e/internal` subpath.
+- `packages/mobile` — the published `@e2e-dev/mobile` package: the
+  iOS/Android engine on agent-device, built with the same public
+  `defineEngine`, contributing the `device` fixture. Like the web engine it
+  depends on `e2e` (peer), never the reverse; the engine implementation
+  imports from `e2e/engine` only, and a target names it as `engine: mobile()`.
+  The `@e2e-dev/mobile/tools` subpath holds the agent-side `open_app`, `swipe`,
+  and `alert` tools; focused-field typing uses the engine's keyboard grammar.
+  The main entry never loads the AI SDK.
 - `packages/kernel` - the published `@e2e-dev/kernel` package: Kernel hosted
   browsers for the web engine. An official integration with a hosted service
   is one package per service, named after it (`@e2e-dev/<service>`), with the
@@ -77,7 +85,19 @@ suites that consume the built packages the way a user would.
   hosted iOS simulators and Android emulators for the mobile engine
   (`DeviceProvider`). Expo publishes no SDK for the sessions API, so it calls
   Expo's GraphQL API with `fetch`, and `@e2e-dev/mobile` is its only peer.
-- `packages/testmu` - the published `@e2e-dev/testmu` package: TestMu AI
+- `packages/decision` — the published `@e2e-dev/decision` package: a
+  `StepExecutor` (`decisionExecutor()`) that drives `agent.act` and
+  `agent.assert` through an AI SDK *evaluation* model answering `choice`
+  questions with probability distributions, plus an optional small language
+  model that writes field values when the decision model picks `type`.
+  `minProbability` and `minConfidence` gate a chosen operation, target,
+  secret, or assertion verdict.
+- `packages/github` — the published `@e2e-dev/github` package: the reporter
+  that posts the run as one pull request comment from GitHub Actions and
+  keeps it current on reruns, writing the same text to the job summary. It
+  reads the token, event, and repository when the run finishes, never at
+  config load, and renders the page with `renderMarkdownReport` from `e2e`.
+- `packages/testmu` — the published `@e2e-dev/testmu` package: TestMu AI
   (formerly LambdaTest) hosted Android emulators, iOS simulators, and real
   devices for the mobile engine (`DeviceProvider`). agent-device's `testmu`
   cloud provider is the vendor client: the package allocates agent-device
@@ -120,6 +140,14 @@ suites that consume the built packages the way a user would.
   "Committed recordings" under Gotchas. Scenario files are copies: keep
   diffs against the source minimal, and name no company a scenario was
   distilled from.
+- `examples/` — standalone user-facing projects, one per technology
+  (`with-vite`, `with-next`, `with-expo`, `with-swiftui`), each the same
+  one-screen greeter demo with deterministic and agent tests. They install
+  the published packages from npm, sit outside the pnpm workspace, commit no
+  lockfile, and run in no CI; oxlint and fallow ignore them. A change runs
+  the example's suite by hand and updates the "Last checked" line in its
+  README. A SwiftUI example keeps its tests in an `e2e/` folder beside the
+  native project, as a user would.
 - `docs/` (the Mintlify docs site; pages are the `.mdx` files under `docs/`,
   navigation, theme, and redirects in `docs/docs.json`, extra CSS in
   `docs/style.css`; `docs/examples/` is typechecked and shown verbatim on
@@ -218,7 +246,7 @@ thread handled, and labeled `Ready for Human Review`. "It compiles" and
 
 ## Testing quirks
 
-- Vitest 4, `pool: 'forks'`, two projects. `integration` is capped at
+- Vitest 5, `pool: 'forks'`, two projects. `integration` is capped at
   `maxWorkers: 3` and runs in a later group — do not raise it; CPU starvation
   produces timeouts indistinguishable from real failures.
 - Integration tests write throwaway projects into

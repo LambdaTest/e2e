@@ -4,7 +4,7 @@
  * without spawning processes or browsers.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { CollectedFile, CollectedTest, Collection } from '../../src/collect/collect.ts';
 import type {
   ResolvedTestOptions,
@@ -15,8 +15,9 @@ import type {
 import type { ResolvedTarget } from '../../src/config/resolve.ts';
 import { defineEngine, type EngineHandle } from '../../src/engine/index.ts';
 import { classifyError, serializeError } from '../../src/internal/errors.ts';
-import type { ResultRecord, RunError, SerialGroupRecord } from '../../src/run/records.ts';
+import type { AttemptRecord, ResultRecord, RunError, SerialGroupRecord, SerialMemberRecord } from '../../src/run/records.ts';
 import { runUnits } from '../../src/run/scheduler.ts';
+import { serialGroupId, type SerialAttemptRun } from '../../src/run/serial.ts';
 import { buildWorkPlans, type TargetWorkPlan } from '../../src/run/units.ts';
 import type { SpawnUnitRunner, UnitRunner, UnitRunnerEvents } from '../../src/run/unit-runner.ts';
 import type { MainToWorker, RunUnitMessage } from '../../src/run/worker/protocol.ts';
@@ -138,12 +139,33 @@ interface FakeBehaviour {
   readonly fatalOn?: readonly string[];
   /** Targets whose workers exit instead of becoming ready. */
   readonly failInit?: readonly string[];
+  /** Workers spawned from this index on exit instead of becoming ready, whatever their target. */
+  readonly failInitFrom?: number;
   /** Targets whose workers hang in startup, never becoming ready or exiting. */
   readonly neverReady?: readonly string[];
   /** Unit ids whose worker never finishes: a test that will not end on its own. */
   readonly hangOn?: readonly string[];
+  /** Attempts the unit's first pair finishes before the worker hangs: a test caught between attempts. */
+  readonly attemptsBeforeHang?: readonly AttemptRecord[];
+  /** The hung pair starts its next attempt after `attemptsBeforeHang`, and the worker exits on its own once interrupted. */
+  readonly exitDuringNextAttemptOnInterrupt?: boolean;
+  /** Serial group attempts the unit's pairs (one group) finish before the worker hangs. */
+  readonly serialRunsBeforeHang?: readonly SerialAttemptRun[];
+  /** Members the group's next attempt finishes before the worker hangs. */
+  readonly serialMembersBeforeHang?: readonly SerialMemberRecord[];
+  /** Instead of hanging, the worker exits on its own once it sent what came before. */
+  readonly exitInsteadOfHang?: boolean;
   /** Workers ignore `terminate` and have to be killed. */
   readonly ignoreTerminate?: boolean;
+  /**
+   * Test ids whose attempt passes its deadline (`WATCHDOG_MS` timeout and
+   * cleanup budget). `blocked` never answers a ping again, as a body spinning
+   * on the event loop; `slow-teardown` answers every ping and reports the
+   * attempt timed out after `SLOW_TEARDOWN_MS`, as a teardown still running.
+   */
+  readonly overrun?: Record<string, 'blocked' | 'slow-teardown'>;
+  /** Attempts an `overrun` pair finishes before the attempt that overruns, which comes next. */
+  readonly attemptsBeforeOverrun?: readonly AttemptRecord[];
   /**
    * The first `workers` spawned die of `signal` before becoming ready, as
    * workers still loading do when a terminal Ctrl-C reaches the process
@@ -151,6 +173,36 @@ interface FakeBehaviour {
    */
   readonly signalledInit?: { readonly workers: number; readonly signal: NodeJS.Signals };
 }
+
+const FAILED_ATTEMPT: AttemptRecord = {
+  id: 'attempt-0',
+  index: 0,
+  status: 'failed',
+  startedAt: '2026-01-01T00:00:00.000Z',
+  durationMs: 5,
+  steps: [],
+  artifacts: [],
+  error: serializeError(classifyError(new Error('first attempt fails'))),
+  secondaryErrors: [],
+  cleanup: 'complete',
+};
+
+const PASSED_RETRY: AttemptRecord = {
+  id: 'attempt-1',
+  index: 1,
+  status: 'passed',
+  startedAt: '2026-01-01T00:00:01.000Z',
+  durationMs: 5,
+  steps: [],
+  artifacts: [],
+  secondaryErrors: [],
+  cleanup: 'complete',
+};
+
+/** Test timeout and cleanup budget of an `overrun` attempt. */
+const WATCHDOG_MS = 20;
+/** Long enough for several pings, each at least 5 s apart whatever the cleanup budget. */
+const SLOW_TEARDOWN_MS = 12_000;
 
 class FakeFleet {
   readonly spawned: { targetName: string; workerSlot: number }[] = [];
@@ -189,6 +241,7 @@ class FakeRunner implements UnitRunner {
   readonly exit: Promise<void>;
   private finish!: () => void;
   private exited = false;
+  private blocked = false;
 
   constructor(
     private readonly index: number,
@@ -208,7 +261,7 @@ class FakeRunner implements UnitRunner {
         if (index < signalled.workers) this.end(`code null, signal ${signalled.signal}`, signalled.signal);
         return;
       }
-      if (behaviour.failInit?.includes(targetName) === true) this.end('init failed');
+      if (behaviour.failInit?.includes(targetName) === true || index >= (behaviour.failInitFrom ?? Infinity)) this.end('init failed');
       else this.events.onMessage({ type: 'ready' });
     }, 0);
   }
@@ -221,6 +274,10 @@ class FakeRunner implements UnitRunner {
     if (this.exited) return;
     if (message.type !== 'run-unit') this.fleet.controlMessages.push(message.type);
     if (message.type === 'interrupt') this.fleet.interruptSkips.push(message.skip);
+    if (message.type === 'interrupt' && this.behaviour.exitDuringNextAttemptOnInterrupt === true) {
+      setTimeout(() => this.end('code 7, signal null'), 0);
+      return;
+    }
     if (message.type === 'shutdown') {
       setTimeout(() => this.end('shut down'), 0);
       return;
@@ -229,9 +286,47 @@ class FakeRunner implements UnitRunner {
       if (this.behaviour.ignoreTerminate !== true) setTimeout(() => this.end('terminated'), 0);
       return;
     }
+    if (message.type === 'ping') {
+      if (!this.blocked) setTimeout(() => this.events.onMessage({ type: 'pong' }), 0);
+      return;
+    }
     if (message.type !== 'run-unit') return;
     this.fleet.unitsByWorker[this.index]!.push(message);
-    if (this.behaviour.hangOn?.includes(message.unitId) === true) return;
+    if (this.behaviour.hangOn?.includes(message.unitId) === true) {
+      const first = message.pairs[0];
+      for (const finishedRun of this.behaviour.serialRunsBeforeHang ?? []) {
+        const groupId = serialGroupId(first!.test.serialId!, this.targetName, first!.agent, first!.repeat);
+        for (const [index, member] of finishedRun.record.members.entries()) {
+          const pair = message.pairs[index]!;
+          this.events.onMessage({ type: 'pair-start', testId: pair.test.id, agent: pair.agent, repeat: pair.repeat, title: pair.test.id, file: pair.test.file, serialId: pair.test.serialId });
+          this.events.onMessage({ type: 'serial-member', groupId, attempt: finishedRun.record, member });
+        }
+        this.events.onMessage({ type: 'serial-attempt', groupId, run: finishedRun });
+      }
+      const partial = this.behaviour.serialMembersBeforeHang ?? [];
+      if (partial.length > 0) {
+        const groupId = serialGroupId(first!.test.serialId!, this.targetName, first!.agent, first!.repeat);
+        const attempt = { id: 'group-attempt-partial', index: this.behaviour.serialRunsBeforeHang?.length ?? 0, startedAt: '2026-01-01T00:00:00.000Z' };
+        for (const [index, member] of partial.entries()) {
+          const pair = message.pairs[index]!;
+          this.events.onMessage({ type: 'pair-start', testId: pair.test.id, agent: pair.agent, repeat: pair.repeat, title: pair.test.id, file: pair.test.file, serialId: pair.test.serialId });
+          this.events.onMessage({ type: 'serial-member', groupId, attempt, member });
+        }
+      }
+      const attempts = this.behaviour.attemptsBeforeHang ?? [];
+      const nextAttempt = this.behaviour.exitDuringNextAttemptOnInterrupt === true;
+      if ((attempts.length > 0 || nextAttempt) && first !== undefined) {
+        const pair = { testId: first.test.id, agent: first.agent, repeat: first.repeat };
+        this.events.onMessage({ type: 'pair-start', ...pair, title: first.test.id, file: first.test.file, serialId: undefined });
+        for (const attempt of attempts) {
+          this.events.onMessage({ type: 'attempt-start', ...pair, index: attempt.index });
+          this.events.onMessage({ type: 'attempt', ...pair, attempt });
+        }
+        if (nextAttempt) this.events.onMessage({ type: 'attempt-start', ...pair, index: attempts.length });
+      }
+      if (this.behaviour.exitInsteadOfHang === true) setTimeout(() => this.end('code 7, signal null'), 0);
+      return;
+    }
     setTimeout(() => this.completeUnit(message), 0);
   }
 
@@ -239,7 +334,7 @@ class FakeRunner implements UnitRunner {
     this.end('killed');
   }
 
-  private completeUnit(message: RunUnitMessage): void {
+  private async completeUnit(message: RunUnitMessage): Promise<void> {
     if (this.exited) return;
     if (this.behaviour.fatalOn?.includes(message.unitId) === true) {
       this.events.onMessage({ type: 'fatal', error: serializeError(classifyError(new Error('engine exploded'))) });
@@ -259,6 +354,24 @@ class FakeRunner implements UnitRunner {
         });
         this.end('crashed');
         return;
+      }
+      const overrun = this.behaviour.overrun?.[pair.test.id];
+      if (overrun !== undefined) {
+        const key = { testId: pair.test.id, agent: pair.agent, repeat: pair.repeat };
+        const finished = this.behaviour.attemptsBeforeOverrun ?? [];
+        for (const attempt of finished) {
+          this.events.onMessage({ type: 'attempt-start', ...key, index: attempt.index });
+          this.events.onMessage({ type: 'attempt', ...key, attempt });
+        }
+        this.events.onMessage({ type: 'attempt-start', ...key, index: finished.length });
+        this.events.onMessage({ type: 'attempt-deadline', ...key, attempt: finished.length, attemptId: `attempt-${finished.length}`, startedAt: new Date().toISOString(), timeoutMs: WATCHDOG_MS, graceMs: WATCHDOG_MS });
+        if (overrun === 'blocked') {
+          this.blocked = true;
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, SLOW_TEARDOWN_MS));
+        if (this.exited) return;
+        this.events.onMessage({ type: 'attempt-end' });
       }
       const status = this.behaviour.status?.[pair.test.id] ?? 'passed';
       this.events.onMessage({
@@ -587,7 +700,68 @@ describe('scheduler gating and dispatch', () => {
   });
 });
 
+/** Two members of one serial group in `tests/a.e2e.ts`. */
+function serialPairs(target: ResolvedTarget): TestTargetPair[] {
+  return ['step 1', 'step 2'].map((title, declarationIndex) =>
+    makePair(makeTest('tests/a.e2e.ts', title, { declarationIndex, serialId: 'tests/a.e2e.ts::wizard' }), target),
+  );
+}
+
+/** One member's record in group attempt `attemptIndex`. */
+function memberRecord(pairs: readonly TestTargetPair[], attemptIndex: number, memberIndex: number, status: 'passed' | 'failed'): SerialMemberRecord {
+  return {
+    id: `group-attempt-${attemptIndex}:member:${memberIndex}`,
+    index: memberIndex,
+    testId: pairs[memberIndex]!.test.id,
+    status,
+    startedAt: '2026-01-01T00:00:00.000Z',
+    durationMs: 1,
+    steps: [],
+    ...(status === 'failed' ? { error: FAILED_ATTEMPT.error! } : {}),
+    secondaryErrors: [],
+  };
+}
+
+/** A finished group attempt whose members ended with `statuses`. */
+function groupRun(pairs: readonly TestTargetPair[], index: number, statuses: readonly ('passed' | 'failed')[]): SerialAttemptRun {
+  const failed = statuses.includes('failed');
+  return {
+    reachedMembers: true,
+    record: {
+      id: `group-attempt-${index}`,
+      index,
+      status: failed ? 'failed' : 'passed',
+      startedAt: '2026-01-01T00:00:00.000Z',
+      durationMs: 5,
+      members: statuses.map((status, memberIndex) => memberRecord(pairs, index, memberIndex, status)),
+      artifacts: [],
+      ...(failed ? { error: FAILED_ATTEMPT.error! } : {}),
+      secondaryErrors: [],
+      cleanup: 'complete',
+    },
+  };
+}
+
+/** Runs `pairs` on `fleet` and interrupts, then forces, while the unit hangs. */
+async function runForcedInterrupt(pairs: TestTargetPair[], target: ResolvedTarget, fleet: FakeFleet): Promise<Collected> {
+  const interrupt = new AbortController();
+  const force = new AbortController();
+  const timers = [setTimeout(() => interrupt.abort(), 20), setTimeout(() => force.abort(), 40)];
+  const collected = await run(
+    makeSelection([{ target, pairs }]),
+    makeCollection(['tests/a.e2e.ts'], pairs),
+    fleet,
+    { workers: 1, interruptSignal: interrupt.signal, forceSignal: force.signal, interruptGraceMs: 30_000 },
+  );
+  for (const timer of timers) clearTimeout(timer);
+  return collected;
+}
+
 describe('scheduler fault handling', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('synthesizes results and a run error when a worker dies mid-unit', async () => {
     const target = makeTarget('web', 0);
     const pairs = ['first', 'second'].map((name, index) =>
@@ -610,6 +784,123 @@ describe('scheduler fault handling', () => {
     const notStarted = collected.results.find((result) => result.test.title === 'second')!;
     expect(notStarted.status).toBe('skipped');
     expect(notStarted.skip?.cause).toBe('infrastructure-unavailable');
+  });
+
+  it('kills a worker that stops answering past an attempt deadline, times the test out, and runs the rest of its file on a fresh worker', async () => {
+    const target = makeTarget('web', 0);
+    const pairs = ['spins', 'next', 'last'].map((name, index) =>
+      makePair(makeTest('tests/a.e2e.ts', name, { declarationIndex: index }), target),
+    );
+    const fleet = new FakeFleet({ overrun: { 'tests/a.e2e.ts::spins': 'blocked' } });
+
+    vi.useFakeTimers();
+    const running = run(
+      makeSelection([{ target, pairs }]),
+      makeCollection(['tests/a.e2e.ts'], pairs),
+      fleet,
+      { workers: 1 },
+    );
+    await vi.runAllTimersAsync();
+    const collected = await running;
+
+    expect(collected.runErrors).toEqual([]);
+    expect(collected.results.map((result) => [result.test.title, result.status])).toEqual([
+      ['spins', 'timed-out'],
+      ['next', 'passed'],
+      ['last', 'passed'],
+    ]);
+    const attempt = collected.results[0]!.attempts[0]!;
+    expect([attempt.status, attempt.error?.code, attempt.cleanup]).toEqual(['timed-out', 'TEST_TIMEOUT', 'forced']);
+    expect(fleet.controlMessages).toContain('ping');
+    expect(fleet.unitsByWorker.map((units) => units.flatMap((unit) => unit.pairs.map((pair) => pair.test.title)))).toEqual([
+      ['spins', 'next', 'last'],
+      ['next', 'last'],
+    ]);
+  });
+
+  it('keeps the attempts before the one a killed worker hung in, which times out at the next index', async () => {
+    const target = makeTarget('web', 0);
+    const pairs = ['spins on retry', 'next'].map((name, index) =>
+      makePair(makeTest('tests/a.e2e.ts', name, { declarationIndex: index }), target),
+    );
+    const fleet = new FakeFleet({ overrun: { 'tests/a.e2e.ts::spins on retry': 'blocked' }, attemptsBeforeOverrun: [FAILED_ATTEMPT] });
+
+    vi.useFakeTimers();
+    const running = run(
+      makeSelection([{ target, pairs }]),
+      makeCollection(['tests/a.e2e.ts'], pairs),
+      fleet,
+      { workers: 1 },
+    );
+    await vi.runAllTimersAsync();
+    const collected = await running;
+
+    expect(collected.runErrors).toEqual([]);
+    expect(collected.results.map((result) => [result.test.title, result.status])).toEqual([
+      ['spins on retry', 'timed-out'],
+      ['next', 'passed'],
+    ]);
+    expect(collected.results[0]!.attempts.map((attempt) => [attempt.index, attempt.status, attempt.error?.code])).toEqual([
+      [0, 'failed', 'ERROR'],
+      [1, 'timed-out', 'TEST_TIMEOUT'],
+    ]);
+  });
+
+  it('skips the rest of a hung file when its target failed while the worker hung', async () => {
+    const target = makeTarget('web', 0);
+    const pairs = [
+      makePair(makeTest('tests/a.e2e.ts', 'spins'), target),
+      makePair(makeTest('tests/a.e2e.ts', 'next', { declarationIndex: 1 }), target),
+      makePair(makeTest('tests/b.e2e.ts', 'other'), target),
+    ];
+    const fleet = new FakeFleet({ overrun: { 'tests/a.e2e.ts::spins': 'blocked' }, failInitFrom: 1 });
+
+    vi.useFakeTimers();
+    const running = run(
+      makeSelection([{ target, pairs }]),
+      makeCollection(['tests/a.e2e.ts', 'tests/b.e2e.ts'], pairs),
+      fleet,
+      { workers: 2 },
+    );
+    await vi.runAllTimersAsync();
+    const collected = await running;
+
+    expect(collected.runErrors.map((runError) => runError.error.code)).toEqual(['WORKER_INIT_FAILED']);
+    expect(
+      collected.results.map((result) => [result.test.title, result.status, result.skip?.reason]).toSorted(),
+    ).toEqual([
+      ['next', 'skipped', 'worker process failed to start'],
+      ['other', 'skipped', 'worker process failed to start'],
+      ['spins', 'timed-out', undefined],
+    ]);
+  });
+
+  it('leaves a worker that answers its pings to finish an attempt past its deadline', async () => {
+    const target = makeTarget('web', 0);
+    const pairs = ['tears down slowly', 'next'].map((name, index) =>
+      makePair(makeTest('tests/a.e2e.ts', name, { declarationIndex: index }), target),
+    );
+    const fleet = new FakeFleet({
+      overrun: { 'tests/a.e2e.ts::tears down slowly': 'slow-teardown' },
+      status: { 'tests/a.e2e.ts::tears down slowly': 'timed-out' },
+    });
+
+    vi.useFakeTimers();
+    const running = run(
+      makeSelection([{ target, pairs }]),
+      makeCollection(['tests/a.e2e.ts'], pairs),
+      fleet,
+      { workers: 1 },
+    );
+    await vi.runAllTimersAsync();
+    const collected = await running;
+
+    expect(collected.results.map((result) => [result.test.title, result.status])).toEqual([
+      ['tears down slowly', 'timed-out'],
+      ['next', 'passed'],
+    ]);
+    expect(fleet.controlMessages.filter((type) => type === 'ping').length).toBeGreaterThan(1);
+    expect(fleet.spawned).toHaveLength(1);
   });
 
   it('reports a fatal error once and not the kill that follows it', async () => {
@@ -743,6 +1034,105 @@ describe('scheduler fault handling', () => {
     // The pairs never reported; a forced exit is the one that was asked for.
     expect(collected.results.map((result) => result.status).toSorted()).toEqual(['skipped', 'skipped']);
     expect(collected.runErrors).toEqual([]);
+  });
+
+  it.each([
+    { finished: [FAILED_ATTEMPT], status: 'failed' },
+    { finished: [FAILED_ATTEMPT, PASSED_RETRY], status: 'flaky' },
+  ])('a forced interrupt keeps the attempts a test finished and their retry verdict ($status)', async ({ finished, status }) => {
+    const target = makeTarget('web', 0);
+    const pairs = [makePair(makeTest('tests/a.e2e.ts', 'a'), target)];
+    const fleet = new FakeFleet({ hangOn: ['file::web::tests/a.e2e.ts'], attemptsBeforeHang: finished });
+    const interrupt = new AbortController();
+    const force = new AbortController();
+    const timers = [setTimeout(() => interrupt.abort(), 20), setTimeout(() => force.abort(), 40)];
+
+    const collected = await run(
+      makeSelection([{ target, pairs }]),
+      makeCollection(['tests/a.e2e.ts'], pairs),
+      fleet,
+      { workers: 1, interruptSignal: interrupt.signal, forceSignal: force.signal, interruptGraceMs: 30_000 },
+    );
+    for (const timer of timers) clearTimeout(timer);
+
+    expect(collected.results).toHaveLength(1);
+    expect(collected.results[0]!.status).toBe(status);
+    expect(collected.results[0]!.attempts).toEqual(finished);
+  });
+
+  it.each<{ statuses: ('passed' | 'failed')[][]; verdict: string; results: string[] }>([
+    { statuses: [['passed', 'failed']], verdict: 'failed', results: ['passed', 'failed'] },
+    { statuses: [['passed', 'failed'], ['passed', 'passed']], verdict: 'flaky', results: ['flaky', 'flaky'] },
+  ])('a forced interrupt keeps the group attempts a serial group finished and their retry verdict ($verdict)', async ({ statuses, verdict, results }) => {
+    const target = makeTarget('web', 0);
+    const pairs = serialPairs(target);
+    const runs = statuses.map((members, index) => groupRun(pairs, index, members));
+    const fleet = new FakeFleet({ hangOn: ['file::web::tests/a.e2e.ts'], serialRunsBeforeHang: runs });
+    const collected = await runForcedInterrupt(pairs, target, fleet);
+
+    expect(collected.serialGroups).toHaveLength(1);
+    expect(collected.serialGroups[0]!.status).toBe(verdict);
+    expect(collected.serialGroups[0]!.attempts).toEqual(runs.map((entry) => entry.record));
+    expect(collected.results.map((result) => result.status)).toEqual(results);
+  });
+
+  it('a forced interrupt mid group attempt keeps the members that attempt finished', async () => {
+    const target = makeTarget('web', 0);
+    const pairs = serialPairs(target);
+    const finished = memberRecord(pairs, 0, 0, 'passed');
+    const fleet = new FakeFleet({ hangOn: ['file::web::tests/a.e2e.ts'], serialMembersBeforeHang: [finished] });
+    const collected = await runForcedInterrupt(pairs, target, fleet);
+
+    const group = collected.serialGroups[0]!;
+    expect(group.status).toBe('interrupted');
+    expect(group.attempts.map((attempt) => attempt.status)).toEqual(['interrupted']);
+    expect(group.attempts[0]!.members[0]).toEqual(finished);
+    expect(group.attempts[0]!.members[1]!.status).toBe('skipped');
+    expect(collected.results.map((result) => result.status)).toEqual(['passed', 'skipped']);
+  });
+
+  it('records a crash after a serial group finished its last attempt on that attempt', async () => {
+    const target = makeTarget('web', 0);
+    const pairs = serialPairs(target);
+    const passed = groupRun(pairs, 0, ['passed', 'passed']);
+    const fleet = new FakeFleet({ hangOn: ['file::web::tests/a.e2e.ts'], serialRunsBeforeHang: [passed], exitInsteadOfHang: true });
+    const collected = await run(makeSelection([{ target, pairs }]), makeCollection(['tests/a.e2e.ts'], pairs), fleet, { workers: 1 });
+
+    const group = collected.serialGroups[0]!;
+    expect(group.status).toBe('passed');
+    expect(group.attempts).toHaveLength(1);
+    expect(group.attempts[0]!.cleanup).toBe('forced');
+    expect(group.attempts[0]!.secondaryErrors.map((error) => error.code)).toEqual(['WORKER_CRASH']);
+    expect(collected.results.map((result) => result.status)).toEqual(['passed', 'passed']);
+    expect(collected.runErrors.map((runError) => runError.error.code)).toEqual(['WORKER_EXIT']);
+  });
+
+  it('a worker that exits on its own during the interrupt grace crashes the test it was running', async () => {
+    const target = makeTarget('web', 0);
+    const pairs = [makePair(makeTest('tests/a.e2e.ts', 'a'), target)];
+    const fleet = new FakeFleet({
+      hangOn: ['file::web::tests/a.e2e.ts'],
+      attemptsBeforeHang: [FAILED_ATTEMPT],
+      exitDuringNextAttemptOnInterrupt: true,
+    });
+    const interrupt = new AbortController();
+    const timer = setTimeout(() => interrupt.abort(), 20);
+
+    const collected = await run(
+      makeSelection([{ target, pairs }]),
+      makeCollection(['tests/a.e2e.ts'], pairs),
+      fleet,
+      { workers: 1, interruptSignal: interrupt.signal, interruptGraceMs: 30_000 },
+    );
+    clearTimeout(timer);
+
+    expect(collected.runErrors.map((runError) => runError.error.code)).toEqual(['WORKER_EXIT']);
+    expect(collected.results).toHaveLength(1);
+    expect(collected.results[0]!.status).toBe('failed');
+    expect(collected.results[0]!.attempts.map((attempt) => [attempt.index, attempt.error?.code])).toEqual([
+      [0, FAILED_ATTEMPT.error!.code],
+      [1, 'WORKER_CRASH'],
+    ]);
   });
 
   it('kills a worker that ignores a forced interrupt once the force budget is spent', async () => {

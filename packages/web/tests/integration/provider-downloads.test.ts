@@ -71,7 +71,7 @@ describe.each<BrowserProviderScope>(['worker', 'attempt'])('downloads through a 
       },
     };
     engine = webEngine({ browser: provider });
-    const prepared = await engine.prepare!({ runId: 'run-downloads', targetName: 'web', projectRoot: process.cwd(), app: { site: new URL(app.url).hostname }, slots: 1, env: {}, signal: signal(), log: () => undefined });
+    const prepared = await engine.prepare!({ runId: 'run-downloads', targetName: 'web', projectRoot: process.cwd(), app: { site: new URL(app.url).hostname }, slots: 1, env: {}, signal: signal(), headed: false, log: () => undefined });
     await engine.init!({
       runId: 'run-downloads', targetName: 'web', projectRoot: process.cwd(),
       app: { site: new URL(app.url).hostname }, env: { ...prepared?.env }, headed: false,
@@ -100,6 +100,7 @@ describe.each<BrowserProviderScope>(['worker', 'attempt'])('downloads through a 
     const file = await browser.waitForDownload(() => page.locator('#download').click());
 
     expect(file.suggestedFilename).toBe('report.txt');
+    expect(file.path).toMatch(/^downloads\/\d{3}-report\.txt$/);
     expect(readFileSync(path.join(artifactsDir, file.path), 'utf8')).toBe('report body');
     expect(attached).toEqual([file.path]);
     expect(reads).toHaveLength(1);

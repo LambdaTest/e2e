@@ -28,7 +28,7 @@ test('selects part of a secret in a plain field', async ({ app, agent, screen })
   await agent.assert('part of the plain token is selected');
   await screen.getByLabel('Token').fill(credentials.user('member').password);
   await agent.assert('part of the secret token is selected');
-  await screen.getByRole('button', { name: 'Not on this page' }).tap();
+  await screen.getByRole('button', { name: 'Not on this page' }).tap({ timeout: 500 });
 });
 `;
 

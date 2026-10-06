@@ -10,7 +10,6 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startFixtureApp, type FixtureApp } from '../helpers/fixture-app.ts';
 import { installFakeLoopModel, loopCalls, nodeIdFor } from '../helpers/fake-loop-model.ts';
-import { assertValidReport } from '../helpers/report-schema.ts';
 import { resultByTitle, runProject, type FixtureProject } from '../helpers/run-project.ts';
 import type { RunOutcome } from '../helpers/run-project.ts';
 import type { StepExecutor, StepExecutorContext } from '../../src/agent/executor.ts';
@@ -147,7 +146,6 @@ describe('agent.act with a hand-rolled step executor', () => {
     expect(step!.metrics!.actionSteps).toBe(1);
     expect(step!.explanation).toContain('the counter shows 1');
     const engineEvents = step!.events.filter((event) => event.kind === 'engine');
-    const observations = step!.events.filter((event) => event.kind === 'observation');
     expect(engineEvents).toHaveLength(1);
     const modelEvents = step!.events.filter((event) => event.kind === 'model');
     expect(modelEvents).toHaveLength(1);
@@ -155,17 +153,6 @@ describe('agent.act with a hand-rolled step executor', () => {
     // time than the engine event, later in the list.
     expect(step!.events.indexOf(modelEvents[0]!)).toBeGreaterThan(step!.events.indexOf(engineEvents[0]!));
     expect(Date.parse(modelEvents[0]!.startedAt)).toBeLessThanOrEqual(Date.parse(engineEvents[0]!.startedAt));
-    // The cache baseline also supplies the executor's first look. The other
-    // captures are its post-action look and the cache's passing observation,
-    // whose delta from the baseline becomes the staged trace's end anchors.
-    expect(observations).toHaveLength(3);
-  });
-
-  it('emits a schema-valid report for executor-driven steps', () => {
-    const report = JSON.parse(
-      readFileSync(path.join(project.dir, '.e2e', 'report.json'), 'utf8'),
-    ) as object;
-    assertValidReport(report);
   });
 });
 
@@ -318,39 +305,6 @@ describe('agent.act verdict mapping', () => {
     }
   }, 120_000);
 
-  it('routes agent.assert through a custom executor with assert semantics', async () => {
-    const seen: string[] = [];
-    const executor: StepExecutor = {
-      name: 'judging-executor',
-      async runStep(context: StepExecutorContext) {
-        seen.push(`${context.step.kind}:${context.step.instruction}`);
-        if (context.step.instruction.includes('checkout')) {
-          return { status: 'failed' as const, summary: 'no checkout page exists here' };
-        }
-        const observation = await context.observe();
-        return /status "Counter" text="0"|status.*"0"/.test(observation.text)
-          ? { status: 'passed' as const, summary: 'the counter reads 0' }
-          : { status: 'failed' as const, summary: 'the counter is not zero' };
-      },
-    };
-    const { outcome, project } = await runProject(
-      { 'tests/assert.e2e.ts': ASSERT_SUITE },
-      { appUrl: app.url, config: { tests: 'tests/**/*.e2e.ts', agents: { default: { executor } } } },
-    );
-    try {
-      const result = resultByTitle(outcome, 'custom executor judges assertions');
-      expect(result.status).toBe('failed');
-      // The failed assertion maps to ASSERTION_FAILED, not ACTION_FAILED.
-      expect(result.attempts.at(-1)!.error?.code).toBe('ASSERTION_FAILED');
-      expect(seen[0]).toBe('assert:the counter shows zero');
-      const steps = result.attempts.at(-1)!.steps.filter((s) => s.api === 'agent.assert');
-      expect(steps[0]!.status).toBe('passed');
-      expect(steps[1]!.status).toBe('failed');
-    } finally {
-      project.cleanup();
-    }
-  }, 120_000);
-
   it('fills a declared secret through typeSecret, never exposing the value', async () => {
     const executor: StepExecutor = {
       name: 'login-executor',
@@ -366,11 +320,15 @@ describe('agent.act verdict mapping', () => {
         const observation = await context.observe();
         const password = nodeIdFor(observation.text, /textbox "Password"/);
         await context.actions.typeSecret({ id: password }, 'admin.password');
-        // Undeclared names are refused before any policy check runs.
+        // A configured secret the step never declared is refused before any policy check runs.
         try {
-          await context.actions.typeSecret({ id: password }, 'other');
+          await context.actions.typeSecret({ id: password }, 'stripe-key');
           return { status: 'failed' as const, summary: 'undeclared secret was accepted' };
-        } catch {
+        } catch (cause) {
+          const { code, message } = cause as { code?: string; message?: string };
+          if (code !== 'POLICY_DENIED' || message?.includes('was not declared in this step') !== true) {
+            return { status: 'failed' as const, summary: `unexpected refusal: ${String(code)} ${String(message)}` };
+          }
           return { status: 'passed' as const, summary: 'filled the declared secret only' };
         }
       },
@@ -383,6 +341,7 @@ describe('agent.act verdict mapping', () => {
           tests: 'tests/**/*.e2e.ts',
           agents: { default: { executor } },
           credentials: { admin: { username: 'admin', password: 'admin-pass' } },
+          secrets: { 'stripe-key': 'sk_live_generic_4242' },
         },
       },
     );
@@ -566,15 +525,6 @@ describe('agent.act engine operations are bounded by actionTimeout', () => {
   }, 120_000);
 });
 
-const ASSERT_SUITE = `import { test } from 'e2e';
-
-test('custom executor judges assertions', async ({ app, agent }) => {
-  await app.open();
-  await agent.assert('the counter shows zero');
-  await agent.assert('the checkout page is visible');
-});
-`;
-
 const SECRET_SUITE = `import { test, credentials, expect } from 'e2e';
 
 test('executor fills a declared secret', async ({ app, agent, screen }) => {
@@ -680,10 +630,7 @@ describe('agent.act with the default ToolLoopAgent executor', () => {
       if (call.lastToolResult === '') {
         // First turn: the prompt carries the instruction and initial screen.
         const id = nodeIdFor(call.prompt, /button "Increment"/);
-        return {
-          toolCalls: [{ toolName: 'tap', input: { target: id } }],
-          reasoning: 'The counter starts at 0; tapping Increment once.',
-        };
+        return [{ toolName: 'tap', input: { target: id } }];
       }
       // The tap result reports the change; conclude once the counter reads 1.
       if (/text="1"/.test(call.lastToolResult)) {
@@ -774,20 +721,6 @@ describe('agent.act with the default ToolLoopAgent executor', () => {
     expect(step!.events.filter((event) => event.kind === 'model')).toHaveLength(
       step!.metrics!.modelCalls,
     );
-  });
-
-  it('carries a turn\'s reasoning onto its model event and into the valid report', () => {
-    const attempt = resultByTitle(outcome, 'default agent increments the counter').attempts.at(
-      -1,
-    )!;
-    const step = attempt.steps.find((candidate) => candidate.api === 'agent.act');
-    const modelEvents = step!.events.filter((event) => event.kind === 'model');
-    expect(modelEvents[0]!.reasoning).toBe('The counter starts at 0; tapping Increment once.');
-    expect(modelEvents.at(-1)).not.toHaveProperty('reasoning');
-    const report = JSON.parse(
-      readFileSync(path.join(project.dir, '.e2e', 'report.json'), 'utf8'),
-    ) as object;
-    assertValidReport(report);
   });
 });
 

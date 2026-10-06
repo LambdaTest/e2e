@@ -20,7 +20,7 @@ import {
 } from '../internal/errors.ts';
 import { requireKey } from '../internal/keys.ts';
 import { describeExpression, expressionHints } from './expression.ts';
-import { Deadline, POLL_INTERVAL_MS, sleep } from '../internal/time.ts';
+import { cutOffAtDeadline, Deadline, POLL_INTERVAL_MS, sleep } from '../internal/time.ts';
 import type { AttemptBudget } from '../run/budget.ts';
 
 /** Canonical visibility predicate over a semantic node snapshot. */
@@ -158,14 +158,19 @@ export class LocatorEngine {
     deadline: Deadline,
     missingFrame: MissingFrame = 'wait',
   ): Promise<readonly NodeRef[]> {
+    let retried: unknown;
     for (;;) {
+      const startedWithMs = deadline.remaining();
       try {
         return await this.session.locate(expression, this.operationWithin(deadline));
       } catch (cause) {
+        // A retry the deadline cut off saw nothing new: the wait ends on the failure it was retrying.
+        if (retried !== undefined && cutOffAtDeadline(cause, startedWithMs)) throw translateLocatorError(retried, expression);
         const engineError = asEngineError(cause);
         if (engineError?.retryable === true) {
           if (missingFrame === 'empty' && engineError.code === 'FRAME_NOT_FOUND') return [];
           if (!deadline.expired()) {
+            retried = cause;
             await sleep(POLL_INTERVAL_MS, this.signal);
             continue;
           }
@@ -181,18 +186,28 @@ export class LocatorEngine {
    */
   async resolveExactlyOne(expression: LocatorExpression, deadline: Deadline): Promise<NodeRef> {
     const startedMs = Date.now();
+    // The wait as it happened: a deadline capped by the test's remaining
+    // budget waited less than the action timeout, and the report says so.
+    const notFound = (cause?: unknown) =>
+      new TestError('LOCATOR_NOT_FOUND', `locator matched no nodes within ${describeExpression(expression)}`, {
+        details: locatorDetails(expression, Date.now() - startedMs),
+        ...(cause === undefined ? {} : { cause }),
+      });
+    let sampled = false;
     for (;;) {
-      const ref = assertSingle(await this.resolveOnce(expression, deadline), expression);
-      if (ref !== null) return ref;
-      if (deadline.expired()) {
-        // The wait as it happened: a deadline capped by the test's remaining
-        // budget waited less than the action timeout, and the report says so.
-        throw new TestError(
-          'LOCATOR_NOT_FOUND',
-          `locator matched no nodes within ${describeExpression(expression)}`,
-          { details: locatorDetails(expression, Date.now() - startedMs) },
-        );
+      const startedWithMs = deadline.remaining();
+      let refs: readonly NodeRef[];
+      try {
+        refs = await this.resolveOnce(expression, deadline);
+      } catch (cause) {
+        // A resolve the deadline cut off, after one that matched nothing, is the wait running out.
+        if (sampled && cutOffAtDeadline(cause, startedWithMs)) throw notFound(cause);
+        throw cause;
       }
+      sampled = true;
+      const ref = assertSingle(refs, expression);
+      if (ref !== null) return ref;
+      if (deadline.expired()) throw notFound();
       await sleep(POLL_INTERVAL_MS, this.signal);
     }
   }
@@ -368,20 +383,28 @@ export class LocatorEngine {
     if (this.session.actions.has('scrollIntoView')) {
       await this.performUntil(expression, { kind: 'scrollIntoView' }, deadline);
     }
+    const notVisible = (cause?: unknown) =>
+      new TestError('LOCATOR_NOT_FOUND', `locator did not become visible with a box to act within: ${describeExpression(expression)}`, {
+        details: locatorDetails(expression, Date.now() - startedMs),
+        ...(cause === undefined ? {} : { cause }),
+      });
+    let sampled = false;
     for (;;) {
-      const { node } = await this.tryRead(expression, deadline);
+      const startedWithMs = deadline.remaining();
+      let node: SemanticNode | null;
+      try {
+        ({ node } = await this.tryRead(expression, deadline));
+      } catch (cause) {
+        if (sampled && cutOffAtDeadline(cause, startedWithMs)) throw notVisible(cause);
+        throw cause;
+      }
+      sampled = true;
       const rect = isNodeVisible(node) ? node.rect : undefined;
       if (rect !== undefined) {
         await this.dispatchAt({ x: rect.x + offset.x, y: rect.y + offset.y }, action, deadline);
         return;
       }
-      if (deadline.expired()) {
-        throw new TestError(
-          'LOCATOR_NOT_FOUND',
-          `locator did not become visible with a box to act within: ${describeExpression(expression)}`,
-          { details: locatorDetails(expression, Date.now() - startedMs) },
-        );
-      }
+      if (deadline.expired()) throw notVisible();
       await sleep(POLL_INTERVAL_MS, this.signal);
     }
   }

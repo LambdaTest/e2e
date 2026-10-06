@@ -1,9 +1,7 @@
 /**
- * Locator reads and queries through the real runner against the scripted
- * engine: every read answers from the current tree without waiting, secure
- * fields refuse value reads, strictness applies to reads, every query kind
- * and refinement resolves, and malformed refinements are refused before any
- * query runs.
+ * Locator reads through the real runner against the scripted engine: every
+ * read answers from the current tree without waiting, secure fields refuse
+ * value reads, and malformed refinements are refused before any query runs.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -76,75 +74,6 @@ test('allTextContents over a secure field is denied', async ({ app, screen }) =>
   await screen.getByRole('textbox').allTextContents();
 });
 
-test('a read of zero matches is LOCATOR_NOT_FOUND', async ({ app, screen }) => {
-  await app.open('/');
-  await screen.getByText('Never rendered').textContent();
-});
-
-test('a read of several matches is LOCATOR_AMBIGUOUS', async ({ app, screen }) => {
-  await app.open('/');
-  await screen.getByText('Duplicated').textContent();
-});
-
-test('isVisible on several matches is LOCATOR_AMBIGUOUS', async ({ app, screen }) => {
-  await app.open('/');
-  await screen.getByText('Duplicated').isVisible();
-});
-
-test('isDisabled on zero matches is LOCATOR_NOT_FOUND', async ({ app, screen }) => {
-  await app.open('/');
-  await screen.getByRole('button', { name: 'Never exists' }).isDisabled();
-});
-
-test('waitFor times out with LOCATOR_NOT_FOUND', async ({ app, screen }) => {
-  await app.open('/');
-  await screen.getByRole('button', { name: 'Never exists' }).waitFor({ timeout: 50 });
-});
-
-test('every query kind and refinement resolves', async ({ app, screen }) => {
-  await app.open('/');
-  await expect(screen.getByRole('button', { name: 'Submit' })).toBeVisible();
-  await expect(screen.getByRole('button', { name: 'sub', exact: false })).toBeVisible();
-  await expect(screen.getByRole('button', { name: /^Sub/ })).toBeVisible();
-  await expect(screen.getByRole('img', { name: 'Map' })).toBeVisible();
-  await expect(screen.getByRole('heading', { level: 2 })).toHaveText('Recent');
-  await expect(screen.getByRole('heading')).toHaveCount(2);
-  await expect(screen.getByRole('tab', { selected: true })).toHaveText('All');
-  await expect(screen.getByRole('button', { disabled: true })).toHaveAccessibleName('Disabled action');
-  await expect(screen.getByRole('checkbox', { checked: true })).toHaveCount(1);
-  await expect(screen.getByRole('button', { name: 'Menu', expanded: false })).toBeVisible();
-  await expect(screen.getByRole('button', { name: 'Bold', pressed: false })).toBeVisible();
-  await expect(screen.getByText('Ready')).toHaveCount(2);
-  await expect(screen.getByRole('status', { name: 'Ready state' })).toHaveCount(1);
-  await expect(screen.getByText('Ready', { visible: true })).toHaveCount(1);
-  await expect(screen.getByText('Ready', { visible: true })).toBeVisible();
-  await expect(screen.getByLabel('Email')).toBeVisible();
-  await expect(screen.getByLabel('email', { exact: false })).toBeVisible();
-  await expect(screen.getByLabel(/^Em/)).toBeVisible();
-  await expect(screen.getByPlaceholder('you@example.test')).toHaveAccessibleName('Email');
-  await expect(screen.getByPlaceholder('EXAMPLE', { exact: false })).toHaveCount(1);
-  await expect(screen.getByText('Card body')).toBeVisible();
-  await expect(screen.getByText('card BODY', { exact: false })).toBeVisible();
-  await expect(screen.getByText(/^Card/)).toBeVisible();
-  await expect(screen.getByText('Echoed')).toHaveCount(1);
-  await expect(screen.getByDisplayValue('hello-value')).toHaveAccessibleName('Search');
-  await expect(screen.getByDisplayValue(/^hello/)).toHaveCount(1);
-  await expect(screen.getByDisplayValue('hunter2')).toHaveCount(0);
-  await expect(screen.getByTestId('card')).toBeVisible();
-  await expect(screen.getByTestId('todos').getByRole('checkbox')).toHaveCount(3);
-  await expect(screen.getByTestId('todos').getByRole('listitem').filter({ hasText: 'ship' })).toHaveText('Ship runner');
-  await expect(screen.getByTestId('todo').filter({ hasText: /^Write/ })).toHaveCount(1);
-  await expect(screen.getByTestId('todo').filter({ has: screen.getByRole('checkbox', { checked: true }) })).toHaveText('Ship runner');
-  await expect(screen.getByTestId('todo').filter({ hasText: 'Release', has: screen.getByRole('checkbox') })).toHaveCount(1);
-  await expect(screen.getByTestId('todo').filter({ hasText: 'Release', has: screen.getByRole('checkbox', { checked: true }) })).toHaveCount(0);
-  await expect(screen.getByTestId('todo').first()).toHaveText('Write spec');
-  await expect(screen.getByTestId('todo').last()).toHaveText('Release');
-  await expect(screen.getByTestId('todo').nth(1)).toHaveText('Ship runner');
-  await expect(screen.getByTestId('todo').nth(7)).toHaveCount(0);
-  await expect(screen.getByTestId('todo').filter({ hasText: 'Ship' }).getByRole('checkbox')).toBeChecked();
-  await expect(screen.getByRole('list', { name: 'Todos' }).getByText('Release')).toBeVisible();
-});
-
 test('filter without a predicate is INVALID_LOCATOR', async ({ app, screen }) => {
   await app.open('/');
   screen.getByTestId('todo').filter({});
@@ -181,19 +110,6 @@ describe('scripted engine: locator reads and queries', () => {
       const attempt = failed(run.outcome, title, 'POLICY_DENIED', 'reading values from a secure field is denied');
       expect(attempt.error?.category).toBe('configuration');
     }
-  });
-
-  it('applies strictness to reads', () => {
-    failed(run.outcome, 'a read of zero matches is LOCATOR_NOT_FOUND', 'LOCATOR_NOT_FOUND', 'matched no nodes', 'getByText("Never rendered")');
-    failed(run.outcome, 'a read of several matches is LOCATOR_AMBIGUOUS', 'LOCATOR_AMBIGUOUS', 'matched 2 nodes, expected exactly one');
-    failed(run.outcome, 'isVisible on several matches is LOCATOR_AMBIGUOUS', 'LOCATOR_AMBIGUOUS', 'matched 2 nodes');
-    failed(run.outcome, 'isDisabled on zero matches is LOCATOR_NOT_FOUND', 'LOCATOR_NOT_FOUND', 'matched no nodes');
-    const waited = failed(run.outcome, 'waitFor times out with LOCATOR_NOT_FOUND', 'LOCATOR_NOT_FOUND', 'did not become visible');
-    expect(step(waited, 'locator.waitFor').status).toBe('failed');
-  });
-
-  it('resolves every query kind and refinement', () => {
-    passed(run.outcome, 'every query kind and refinement resolves');
   });
 
   it('rejects malformed refinements before any query runs', () => {

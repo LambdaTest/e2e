@@ -7,7 +7,7 @@
 
 import type { Observation, OperationContext } from '../engine/surface.ts';
 import type { DebugTrace } from '../internal/debug.ts';
-import { asEngineError, E2EError } from '../internal/errors.ts';
+import { asEngineError, isE2EError } from '../internal/errors.ts';
 import { timestamp } from '../internal/ids.ts';
 import { POLL_INTERVAL_MS, sleep, type Deadline } from '../internal/time.ts';
 import type { LocatorEngine } from '../locator/engine.ts';
@@ -160,19 +160,34 @@ function timedOutAtDeadline(cause: unknown, deadline: Deadline): boolean {
  * re-read rather than surfaced as a failed call. `guard` is the caller's
  * clock check, so a capture that outlives the deadline reports the step's own
  * timeout rather than whichever transport error the truncated budget produced.
+ * `fallback` asks the engine for fallback pixels, which a secret fill
+ * (`tainted`, read per capture) withholds; a capture that then times out
+ * before the step clock does is the policy denial it is, not an engine
+ * timeout, since only those pixels could have answered.
  */
 export async function retryingObserve(options: {
-  readonly observe: (operation: OperationContext) => Promise<Observation>;
+  readonly observe: (operation: OperationContext, pixelFallback: boolean) => Promise<Observation>;
   readonly operation: () => OperationContext;
   readonly guard: (cause?: unknown) => void;
   readonly signal: AbortSignal;
   readonly api: string;
+  readonly fallback: boolean;
+  readonly tainted: () => boolean;
 }): Promise<Observation> {
   for (;;) {
+    const withheld = options.fallback && options.tainted();
     try {
-      return await options.observe(options.operation());
+      return await options.observe(options.operation(), options.fallback && !withheld);
     } catch (cause) {
       options.guard(cause);
+      if (withheld && asEngineError(cause)?.code === 'OPERATION_TIMEOUT') {
+        throw new AgentError(
+          'POLICY_DENIED',
+          `${options.api} could not read the semantic tree, and its screenshot fallback is denied: ` +
+            'a secret was filled in this attempt, so no pixels leave the runner until it ends (PIXEL_TAINTED)',
+          { cause },
+        );
+      }
       // Structural, not instanceof: an engine a config file imported lives in
       // another module registry, and its retryable race would otherwise fail
       // the observation the moment a page navigates under it.
@@ -187,7 +202,7 @@ export async function retryingObserve(options: {
 
 /** Event code for a failed phase: the runner or engine code, or the error's name. */
 function phaseErrorCode(cause: unknown): string {
-  if (cause instanceof E2EError) return cause.code;
+  if (isE2EError(cause)) return cause.code;
   const engineError = asEngineError(cause);
   if (engineError !== undefined) return engineError.code;
   return cause instanceof Error ? cause.name : 'ERROR';

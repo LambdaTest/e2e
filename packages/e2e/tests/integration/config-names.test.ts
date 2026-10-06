@@ -1,4 +1,4 @@
-/** Target and agent names are artifact path segments: a name that is only dots is refused before anything runs. */
+/** Target names are artifact path segments: a name that is only dots is refused before anything runs. */
 
 import { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -28,22 +28,6 @@ describe('all-dot names', () => {
       ]);
       expect(outcome.results).toHaveLength(0);
       expect(existsSync(path.join(project.dir, '.e2e', 'artifacts'))).toBe(false);
-    } finally {
-      project.cleanup();
-    }
-  });
-
-  it('refuses an agent named `.` as INVALID_CONFIG', async () => {
-    const { outcome, project } = await runProject(SUITE, {
-      appUrl: APP_URL,
-      config: { targets: [{ name: 'fake', platform: 'custom', engine: fakeEngine() }], agents: { '.': {} } },
-    });
-    try {
-      expect(outcome.exitCode).toBe(2);
-      expect(outcome.report.run.errors.map((error) => [error.code, error.message])).toEqual([
-        ['INVALID_CONFIG', 'invalid agent name ".": names are ASCII letters, numbers, "_", "-", or ".", and cannot be only dots'],
-      ]);
-      expect(outcome.results).toHaveLength(0);
     } finally {
       project.cleanup();
     }

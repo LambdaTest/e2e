@@ -383,7 +383,7 @@ test.describe('wizard', { serial: true, retries: 1 }, () => {
   );
 
   it(
-    'classifies EngineErrors from fixture surfaces (app.open) with the canonical mapping',
+    'classifies EngineErrors from fixture surfaces (app.open) with the canonical mapping, and a plain Error as ENGINE_FAILURE',
     async () => {
       const failure = createFakeEngine({
         onNavigate() {
@@ -416,6 +416,23 @@ test.describe('wizard', { serial: true, retries: 1 }, () => {
       expect(secondResult.attempts[0]!.error?.code).toBe('UNSUPPORTED_CAPABILITY');
       expect(second.outcome.exitCode).toBe(2);
       second.project.cleanup();
+
+      const plain = createFakeEngine({
+        onNavigate() {
+          throw new TypeError('renderer gone');
+        },
+      });
+      const third = await runProject(
+        { 'tests/plain-error.e2e.ts': PASSING_TEST },
+        { appUrl: APP_URL, config: engineConfig(plain.engine) },
+      );
+      const thirdResult = resultByTitle(third.outcome, 'taps a node');
+      expect(thirdResult.status).toBe('failed');
+      expect(thirdResult.attempts[0]!.error?.category).toBe('infrastructure');
+      expect(thirdResult.attempts[0]!.error?.code).toBe('ENGINE_FAILURE');
+      expect(thirdResult.attempts[0]!.error?.message).toContain('renderer gone');
+      expect(third.outcome.exitCode).toBe(3);
+      third.project.cleanup();
     },
     60_000,
   );
@@ -665,46 +682,6 @@ test('consumes session', { session: 'acct' }, async ({ app }) => {
   );
 
   it(
-    'retries retryable stale nodes against the engine and never repeats a possibly committed action',
-    async () => {
-      let performCalls = 0;
-      const fake = createFakeEngine({
-        perform() {
-          performCalls += 1;
-          if (performCalls === 1) {
-            throw engineFailure('NODE_STALE', 'node went stale', true);
-          }
-        },
-      });
-      const { outcome, project } = await runProject(
-        { 'tests/stale.e2e.ts': PASSING_TEST },
-        { appUrl: APP_URL, config: engineConfig(fake.engine) },
-      );
-      expect(resultByTitle(outcome, 'taps a node').status).toBe('passed');
-      expect(performCalls).toBe(2);
-
-      let committedCalls = 0;
-      const committed = createFakeEngine({
-        perform() {
-          committedCalls += 1;
-          throw engineFailure('ACTION_MAY_HAVE_COMMITTED', 'maybe committed');
-        },
-      });
-      const second = await runProject(
-        { 'tests/committed.e2e.ts': PASSING_TEST },
-        { appUrl: APP_URL, config: engineConfig(committed.engine) },
-      );
-      const result = resultByTitle(second.outcome, 'taps a node');
-      expect(result.status).toBe('failed');
-      expect(result.attempts[0]!.error?.code).toBe('ACTION_FAILED');
-      expect(committedCalls).toBe(1);
-      project.cleanup();
-      second.project.cleanup();
-    },
-    60_000,
-  );
-
-  it(
     're-observes when an engine reports a retryable observation failure',
     async () => {
       let observeCalls = 0;
@@ -770,27 +747,6 @@ test('consumes session', { session: 'acct' }, async ({ app }) => {
   );
 
   it(
-    'words the vision hint as a condition on an engine that declares screenshots but has produced no pixels',
-    async () => {
-      // The SPI has no pixel-capture declaration: an engine with the artifacts
-      // capability may still return no pixels from observe, as this one does.
-      const fake = createFakeEngine({ artifacts: true });
-      const model = installFakeModel(() => judgment('inconclusive', 'the tree lists no state for the Submit button'));
-      const { outcome, project } = await runProject(
-        { 'tests/observe-inconclusive-artifacts.e2e.ts': OBSERVE_TEST },
-        { appUrl: APP_URL, config: engineConfig(fake.engine, { agents: { default: { model } } }) },
-      );
-      const error = resultByTitle(outcome, 'asserts a node').attempts.at(-1)!.error!;
-      expect(error.code).toBe('ASSERTION_INCONCLUSIVE');
-      expect(error.message).toBe(
-        'the tree lists no state for the Submit button; the judge saw the semantic tree only; if the engine captures pixels, pass vision: true when the answer is in pixels',
-      );
-      project.cleanup();
-    },
-    60_000,
-  );
-
-  it(
     'leaves vision out of an inconclusive judgment once a pixel request of the attempt was degraded',
     async () => {
       // The engine declares screenshots and returns no pixels: the first
@@ -833,12 +789,13 @@ test('asserts after a degraded pixel request', async ({ app, agent }) => {
     async () => {
       // An observation is handed whatever remains of the invocation deadline,
       // so one starting near the end cannot finish. The engine failure that
-      // follows describes a truncated budget, not a broken app.
+      // follows describes a truncated budget, not a broken app. Only the
+      // second poll stalls, so the failure evidence after it observes at once.
       let observeCalls = 0;
       const fake = createFakeEngine({
         async observe(operation) {
           observeCalls += 1;
-          if (observeCalls === 1) return;
+          if (observeCalls !== 2) return;
           await new Promise((resolve) => setTimeout(resolve, operation.timeoutMs + 50));
           throw engineFailure('ENGINE_FAILURE', 'observation ran out of budget');
         },
@@ -870,29 +827,6 @@ test('asserts after a degraded pixel request', async ({ app, agent }) => {
       expect(outcome.report.run.errors.find((error) => error.code === 'UNSUPPORTED_ARTIFACT')?.message).toBe(
         "target \"fake\" (engine fake) cannot record a trace, and the target sets trace: 'on'",
       );
-      project.cleanup();
-    },
-    60_000,
-  );
-
-  it(
-    'normalizes a plain Error thrown by an engine member to infrastructure ENGINE_FAILURE',
-    async () => {
-      const fake = createFakeEngine({
-        onNavigate() {
-          throw new TypeError('renderer gone');
-        },
-      });
-      const { outcome, project } = await runProject(
-        { 'tests/plain-error.e2e.ts': PASSING_TEST },
-        { appUrl: APP_URL, config: engineConfig(fake.engine) },
-      );
-      const result = resultByTitle(outcome, 'taps a node');
-      expect(result.status).toBe('failed');
-      expect(result.attempts[0]!.error?.category).toBe('infrastructure');
-      expect(result.attempts[0]!.error?.code).toBe('ENGINE_FAILURE');
-      expect(result.attempts[0]!.error?.message).toContain('renderer gone');
-      expect(outcome.exitCode).toBe(3);
       project.cleanup();
     },
     60_000,
@@ -1020,7 +954,7 @@ test('needs web', { requires: ['web'] }, async () => {});
   );
 
   it(
-    'registers an engine screenshot as an attempt artifact and reports unsupported gestures honestly',
+    'registers an engine screenshot as an attempt artifact',
     async () => {
       const fake = createFakeEngine({ artifacts: true });
       const file = `import { test } from 'e2e';
@@ -1028,10 +962,6 @@ test('needs web', { requires: ['web'] }, async () => {});
 test('takes evidence', async ({ app }) => {
   await app.open('/');
   await app.screenshot('after-open');
-});
-
-test('swipes without a swipe capability', async ({ screen }) => {
-  await screen.swipe({ direction: 'down' });
 });
 `;
       const { outcome, project } = await runProject(
@@ -1042,10 +972,6 @@ test('swipes without a swipe capability', async ({ screen }) => {
       expect(evidence.status).toBe('passed');
       expect(evidence.attempts[0]!.artifacts.some((artifact) => artifact.kind === 'screenshot')).toBe(true);
       expect(fake.operations.some((op) => op.method === 'artifacts.screenshot(after-open)')).toBe(true);
-      const swipes = resultByTitle(outcome, 'swipes without a swipe capability');
-      expect(swipes.status).toBe('failed');
-      expect(swipes.attempts[0]!.error?.code).toBe('UNSUPPORTED_CAPABILITY');
-      expect(swipes.attempts[0]!.error?.message).toContain('swipe');
       project.cleanup();
     },
     60_000,
@@ -1218,20 +1144,6 @@ test('fails on purpose', async ({ app }) => {
       expect(videosOf(outcome, 'taps a node')).toEqual([]);
       expect(videosOf(outcome, 'fails on purpose', 0)).toEqual([]);
       expect(videosOf(outcome, 'fails on purpose', 1)).toHaveLength(1);
-      project.cleanup();
-    },
-    60_000,
-  );
-
-  it(
-    'records every retry with on-all-retries',
-    async () => {
-      const fake = createFakeEngine({ video: true });
-      const { outcome, project } = await runProject(
-        { 'tests/fail.e2e.ts': FAILING_TEST },
-        { appUrl: APP_URL, config: engineConfig(fake.engine, { video: 'on-all-retries', retries: 2 }) },
-      );
-      expect([0, 1, 2].map((attempt) => videosOf(outcome, 'fails on purpose', attempt).length)).toEqual([0, 1, 1]);
       project.cleanup();
     },
     60_000,

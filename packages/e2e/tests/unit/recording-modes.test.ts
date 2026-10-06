@@ -1,7 +1,7 @@
 /** Which attempts record and keep a trace or a video under each mode, and how firmly the engine is asked. */
 
 import { describe, expect, it } from 'vitest';
-import { attemptRecording, isRecordingMode, recordsOnSomeAttempt } from '../../src/internal/recording-modes.ts';
+import { attemptRecording, recordsOnSomeAttempt } from '../../src/internal/recording-modes.ts';
 
 const set = { source: 'run' } as const;
 
@@ -39,12 +39,5 @@ describe('recordsOnSomeAttempt', () => {
     expect(recordsOnSomeAttempt('on-first-retry', 1)).toBe(true);
     expect(recordsOnSomeAttempt('on-all-retries', 0)).toBe(false);
     expect(recordsOnSomeAttempt('on-all-retries', 2)).toBe(true);
-  });
-});
-
-describe('isRecordingMode', () => {
-  it('accepts the five modes and nothing else', () => {
-    for (const mode of ['off', 'on', 'retain-on-failure', 'on-first-retry', 'on-all-retries']) expect(isRecordingMode(mode)).toBe(true);
-    for (const value of ['all', 'retries', true, undefined]) expect(isRecordingMode(value)).toBe(false);
   });
 });

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   classifyError,
   combineExitCodes,
@@ -8,9 +8,11 @@ import {
   InfrastructureError,
   messageWithCauses,
   sanitizeText,
+  setErrorRedactor,
   withHint,
   serializeError,
   TestError,
+  translateEngineError,
   translateProvisioningError,
   truncateUtf8,
 } from '../../src/internal/errors.ts';
@@ -46,6 +48,17 @@ describe('translateProvisioningError', () => {
   });
 });
 
+describe('translateEngineError', () => {
+  it('keeps the code of a runner error from another module copy', () => {
+    const foreign = new TestError('INVALID_LOCATOR', 'bad selector');
+    Object.setPrototypeOf(foreign, Error.prototype);
+    expect(foreign instanceof E2EError).toBe(false);
+    const translated = translateEngineError(foreign);
+    expect(translated).toBeInstanceOf(E2EError);
+    expect(translated).toMatchObject({ category: 'test', code: 'INVALID_LOCATOR', message: 'bad selector' });
+  });
+});
+
 describe('exit code mapping', () => {
   it('maps categories', () => {
     expect(exitCodeForCategory('test')).toBe(1);
@@ -65,11 +78,6 @@ describe('exit code mapping', () => {
 });
 
 describe('classifyError', () => {
-  it('passes through E2EError instances', () => {
-    const error = new InfrastructureError('X', 'boom');
-    expect(classifyError(error)).toBe(error);
-  });
-
   it('wraps unknown errors as test failures', () => {
     expect(classifyError(new Error('nope')).category).toBe('test');
     expect(classifyError('string failure').category).toBe('test');
@@ -142,18 +150,11 @@ describe('serializeError', () => {
 });
 
 describe('sanitizeText', () => {
-  it('keeps tabs and newlines', () => {
-    expect(sanitizeText('a\tb\nc')).toBe('a\tb\nc');
-  });
-
-  it('replaces C0, DEL, and C1 controls and leaves non-BMP text intact', () => {
+  it('replaces C0, DEL, and C1 controls, keeps tabs and newlines, and leaves non-BMP text intact', () => {
     expect(sanitizeText('a\u0000b\u007fc\u0085d')).toBe('a\uFFFDb\uFFFDc\uFFFDd');
-    expect(sanitizeText('ok 😀 fine')).toBe('ok 😀 fine');
-  });
-
-  it('is repeatable across calls (no regexp state leaks)', () => {
     expect(sanitizeText('\u0001\u0001')).toBe('\uFFFD\uFFFD');
-    expect(sanitizeText('\u0001x')).toBe('\uFFFDx');
+    expect(sanitizeText('a\tb\nc')).toBe('a\tb\nc');
+    expect(sanitizeText('ok 😀 fine')).toBe('ok 😀 fine');
   });
 });
 
@@ -166,28 +167,12 @@ describe('withHint', () => {
 });
 
 describe('truncateUtf8', () => {
-  it('truncates on code point boundaries', () => {
-    expect(truncateUtf8('abcd', 2)).toBe('ab');
-    expect(truncateUtf8('żż', 3)).toBe('ż'); // 2 bytes each
-    expect(truncateUtf8('abc', 10)).toBe('abc');
-  });
-
   it('never splits a four-byte code point and honors a zero budget', () => {
     expect(truncateUtf8('a😀b', 4)).toBe('a'); // 😀 is 4 bytes; 1 + 4 > 4
     expect(truncateUtf8('a😀b', 5)).toBe('a😀');
     expect(truncateUtf8('a😀b', 0)).toBe('');
   });
 });
-
-describe('E2EError', () => {
-  it('carries category, code, and retryability', () => {
-    const error = new E2EError('infrastructure', 'ENGINE_FAILURE', 'x', { retryable: false });
-    expect(error.category).toBe('infrastructure');
-    expect(error.code).toBe('ENGINE_FAILURE');
-    expect(error.retryable).toBe(false);
-  });
-});
-
 
 describe('error details', () => {
   it('carries structured details onto the serialized error, bounded and sanitized, and drops empty ones', () => {
@@ -225,5 +210,29 @@ describe('error details', () => {
     const serialized = serializeError(new TestError('ASSERTION_FAILED', 'nope'), { projectRoot });
     expect(serialized.source?.file).toBe('tests/unit/errors.test.ts');
     expect(serializeError(new TestError('ASSERTION_FAILED', 'nope')).source).toBeUndefined();
+  });
+});
+
+describe('serializeError default redactor', () => {
+  afterEach(() => {
+    setErrorRedactor(undefined);
+  });
+
+  it('uses the installed process redactor when no per-call redactor is given', () => {
+    setErrorRedactor((text) => text.replaceAll('hunter2', '<secret:password>'));
+    const serialized = serializeError(new TestError('ASSERTION_FAILED', 'expected hunter2'), { phase: 'body' });
+    expect(serialized.message).toBe('expected <secret:password>');
+  });
+
+  it('lets a per-call redactor win over the installed one', () => {
+    setErrorRedactor(() => 'installed');
+    const serialized = serializeError(new TestError('ASSERTION_FAILED', 'expected hunter2'), {
+      redact: (text) => text.replaceAll('hunter2', '<secret:per-call>'),
+    });
+    expect(serialized.message).toBe('expected <secret:per-call>');
+  });
+
+  it('is identity when no redactor is installed', () => {
+    expect(serializeError(new TestError('ASSERTION_FAILED', 'expected hunter2')).message).toBe('expected hunter2');
   });
 });

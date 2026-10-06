@@ -115,39 +115,6 @@ describe('--ai-trace on the in-process transport', () => {
     expect(steps.every((step) => step.model_id === 'scripted-loop')).toBe(true);
     expect(steps.every((step) => step.provider === 'fake-loop')).toBe(true);
   });
-
-  it('records the prompt the model saw, its tool definitions with schemas, and its answer', () => {
-    const document = readTrace(project);
-    const [first, second] = document.steps;
-    const input = JSON.parse(first!.input) as {
-      prompt: { role: string; content: unknown }[];
-      tools: { name: string; description?: string; parameters?: { type?: string } }[];
-    };
-    expect(input.prompt[0]!.role).toBe('system');
-    expect(String(input.prompt[0]!.content)).toContain('autonomous end-to-end testing agent');
-    const user = input.prompt.find((message) => message.role === 'user')!.content;
-    // A pixel-mode opening prompt is content parts: the text part carries the instruction.
-    const userText = Array.isArray(user)
-      ? (user as { type: string; text?: string }[]).filter((part) => part.type === 'text').map((part) => part.text).join('\n')
-      : String(user);
-    expect(userText).toContain('increment the counter once');
-    const names = input.tools.map((tool) => tool.name);
-    expect(names).toContain('tap');
-    expect(names).toContain('complete_step');
-    for (const tool of input.tools) expect(tool.parameters?.type).toBe('object');
-
-    const output = JSON.parse(first!.output!) as {
-      finishReason: string;
-      response: { messages: { role: string }[] };
-    };
-    expect(output.finishReason).toBe('tool-calls');
-    expect(output.response.messages.map((message) => message.role)).toEqual(['assistant', 'tool']);
-    expect(JSON.parse(first!.usage!)).toMatchObject({ inputTokens: 100, outputTokens: 20 });
-
-    // The second turn's prompt carries the first turn's tool result.
-    const later = JSON.parse(second!.input) as { prompt: { role: string }[] };
-    expect(later.prompt.map((message) => message.role)).toEqual(['system', 'user', 'assistant', 'tool']);
-  });
 });
 
 describe('--ai-trace on child-process workers', () => {

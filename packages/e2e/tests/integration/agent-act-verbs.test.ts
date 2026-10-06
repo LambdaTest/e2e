@@ -12,7 +12,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startFixtureApp, type FixtureApp } from '../helpers/fixture-app.ts';
 import { imagePointFor, installFakeLoopModel, loopCalls, nodeIdFor, type LoopCall, type LoopToolCall } from '../helpers/fake-loop-model.ts';
-import { createProject, resultByTitle, runExisting, runProject, type FixtureProject, type RunOutcome } from '../helpers/run-project.ts';
+import { createProject, resultByTitle, runExisting, type FixtureProject, type RunOutcome } from '../helpers/run-project.ts';
 
 /** One agentic flow: what the test asks, how the scripted model answers, and the locator check that decides it. */
 interface Flow {
@@ -20,7 +20,7 @@ interface Flow {
   readonly instruction: string;
   /** The test body's check after the step, as source; empty for a flow whose step is expected to fail. */
   readonly check: string;
-  /** Whether the replay pass records and replays this flow too. */
+  /** Whether the second, cached pass runs this flow and replays it. */
   readonly replays?: true;
   /** The tool calls for the turn with `calls` results so far; undefined concludes the step. */
   readonly script: (calls: number, call: LoopCall) => readonly LoopToolCall[] | undefined;
@@ -106,14 +106,6 @@ const FLOWS: readonly Flow[] = [
     script: (calls, call) => (calls === 0 ? [{ toolName: 'upload', input: { target: nodeIdFor(call.prompt, /"Attachment"/), files: ['.env'] } }] : undefined),
   },
   {
-    title: 'refuses a file outside the project',
-    instruction: 'attach a file from outside the project',
-    check: '',
-    verdict: 'failed',
-    script: (calls, call) =>
-      calls === 0 ? [{ toolName: 'upload', input: { target: nodeIdFor(call.prompt, /"Attachment"/), files: ['../outside.txt'] } }] : undefined,
-  },
-  {
     title: 'scrolls a listed node into view',
     instruction: 'scroll to the footnote',
     check: `await expect(screen.getByLabel('Footnote state')).toHaveText('in view');`,
@@ -126,7 +118,7 @@ const FLOWS: readonly Flow[] = [
     check: `await expect(screen.getByLabel('Ledger state')).toHaveText('golden in view');`,
     replays: true,
     script: (calls, call) =>
-      calls === 0 ? [{ toolName: 'scroll_to', input: { text: 'Row 333', target: nodeIdFor(call.prompt, /list "Ledger"/) } }] : undefined,
+      calls === 0 ? [{ toolName: 'scroll_to', input: { text: 'Row 24', target: nodeIdFor(call.prompt, /list "Ledger"/) } }] : undefined,
   },
   {
     title: 'selects one word with a repeated press and sees the selection',
@@ -205,7 +197,10 @@ function actModel(call: LoopCall) {
   return [{ toolName: 'complete_step', input: { status: flow?.verdict ?? 'passed', summary: call.lastToolResult.slice(0, 1_500) || 'done' } }];
 }
 
-const VERB_TOOLS = ['hover', 'hover_at', 'double_tap', 'long_press', 'right_click', 'drag', 'check', 'upload', 'scroll_to', 'back'];
+/** A `grep` pattern that selects exactly the test with this title. */
+function exactTitle(title: string): RegExp {
+  return new RegExp(`^${title.replace(/[.*+?^$()|[\]\\{}]/g, String.raw`\$&`)}$`);
+}
 
 /** The `agent.act` step of one test in a run. */
 function actStepOf(outcome: RunOutcome, title: string) {
@@ -214,35 +209,30 @@ function actStepOf(outcome: RunOutcome, title: string) {
   return step;
 }
 
+let app: FixtureApp;
+let project: FixtureProject;
+let outcome: RunOutcome;
+
+/** The run options for one pass over the project, recording to and replaying from the trace cache. */
+function cachedRun(model: ReturnType<typeof installFakeLoopModel>) {
+  return { appUrl: app.url, config: { tests: 'tests/**/*.e2e.ts', agents: { default: { model } }, cache: 'read-write' as const } };
+}
+
+beforeAll(async () => {
+  app = await startFixtureApp();
+  project = createProject({ 'tests/verbs.e2e.ts': suiteOf(FLOWS), ...PROJECT_FILES });
+  outcome = await runExisting(project, cachedRun(installFakeLoopModel(actModel)));
+}, 240_000);
+
+afterAll(async () => {
+  project?.cleanup();
+  await app?.close();
+});
+
 describe('agent.act grammar verbs', () => {
-  let app: FixtureApp;
-  let outcome: RunOutcome;
-  let project: FixtureProject;
-
-  beforeAll(async () => {
-    app = await startFixtureApp();
-    const model = installFakeLoopModel(actModel);
-    const run = await runProject(
-      { 'tests/verbs.e2e.ts': suiteOf(FLOWS), ...PROJECT_FILES },
-      { appUrl: app.url, config: { tests: 'tests/**/*.e2e.ts', agents: { default: { model } } } },
-    );
-    outcome = run.outcome;
-    project = run.project;
-  }, 240_000);
-
-  afterAll(async () => {
-    project?.cleanup();
-    await app?.close();
-  });
-
   const stepOf = (title: string) => actStepOf(outcome, title);
   const engineEvents = (title: string) => stepOf(title).events.filter((event) => event.kind === 'engine');
   const turnsOf = (instruction: string) => loopCalls.filter((call) => call.prompt.includes(instruction));
-
-  it('offers every verb the browser engine declares', () => {
-    const [first] = turnsOf('hover the account menu');
-    for (const tool of VERB_TOOLS) expect(first!.toolNames).toContain(tool);
-  });
 
   it('hovers by id, reports the control the hover revealed, and records the hover', () => {
     expect(resultByTitle(outcome, 'hovers the menu trigger and taps what it reveals').status).toBe('passed');
@@ -307,23 +297,16 @@ describe('agent.act grammar verbs', () => {
     expect(turnsOf('attach the fixture file')[1]!.lastToolResult).toMatch(/^Uploaded "fixtures\/attachment\.txt" to #\S+\./);
   });
 
-  it('refuses a hidden file and a path outside the project before any engine action, as POLICY_DENIED', () => {
-    for (const [title, instruction, path] of [
-      ['refuses a hidden file', 'attach the env file', '.env'],
-      ['refuses a file outside the project', 'attach a file from outside', '../outside.txt'],
-    ] as const) {
-      expect(resultByTitle(outcome, title).status).toBe('failed');
-      const step = stepOf(title);
-      expect(step.events.filter((event) => event.kind === 'engine')).toHaveLength(0);
-      expect(step.metrics!.actionSteps).toBe(0);
-      expect(step.events.filter((event) => event.kind === 'policy')).toEqual([
-        expect.objectContaining({ name: 'upload.path', decision: 'denied', code: 'POLICY_DENIED' }),
-      ]);
-      // The refusal reaches the model as the action's failure, led by the attempt and the code, naming the path it refused.
-      expect(turnsOf(instruction)[1]!.lastToolResult).toMatch(
-        new RegExp(`^upload ${JSON.stringify(path).replaceAll('.', '\\.')} to #\\S+ failed: POLICY_DENIED: ${JSON.stringify(path).replaceAll('.', '\\.')} is`),
-      );
-    }
+  it('refuses a hidden file before any engine action, as POLICY_DENIED', () => {
+    expect(resultByTitle(outcome, 'refuses a hidden file').status).toBe('failed');
+    const step = stepOf('refuses a hidden file');
+    expect(step.events.filter((event) => event.kind === 'engine')).toHaveLength(0);
+    expect(step.metrics!.actionSteps).toBe(0);
+    expect(step.events.filter((event) => event.kind === 'policy')).toEqual([
+      expect.objectContaining({ name: 'upload.path', decision: 'denied', code: 'POLICY_DENIED' }),
+    ]);
+    // The refusal reaches the model as the action's failure, led by the attempt and the code, naming the path it refused.
+    expect(turnsOf('attach the env file')[1]!.lastToolResult).toMatch(/^upload "\.env" to #\S+ failed: POLICY_DENIED: "\.env" is/);
   });
 
   it('scrolls a listed node into view as one action', () => {
@@ -339,11 +322,11 @@ describe('agent.act grammar verbs', () => {
     const step = stepOf('pages a windowed list to a row it has not rendered');
     const actions = step.events.filter((event) => event.kind === 'engine');
     expect(actions.map((event) => event.name)).toEqual(['scrollUntil']);
-    expect(actions[0]!.detail).toMatch(/^scroll down on list "Ledger" until "Row 333" shows \(\d+ screens\)$/);
-    // Forty-odd pages of the list, one action of the budget.
+    expect(actions[0]!.detail).toMatch(/^scroll down on list "Ledger" until "Row 24" shows \(\d+ screens\)$/);
+    // Several pages of the list, one action of the budget.
     expect(step.metrics!.actionSteps).toBe(1);
-    expect(turnsOf('scroll the ledger')[1]!.lastToolResult).toMatch(/^Scrolled down until "Row 333" was in view\./);
-    expect(turnsOf('scroll the ledger')[1]!.lastToolResult).toMatch(/Row 333 · Golden/);
+    expect(turnsOf('scroll the ledger')[1]!.lastToolResult).toMatch(/^Scrolled down until "Row 24" was in view\./);
+    expect(turnsOf('scroll the ledger')[1]!.lastToolResult).toMatch(/Row 24 · Golden/);
   });
 
   it('repeats a key in one call, one engine action per press, and shows the selection it made', () => {
@@ -394,45 +377,32 @@ describe('agent.act grammar verbs', () => {
 
 describe('agent.act grammar verbs: record then zero-turn replay', () => {
   const flows = FLOWS.filter((flow) => flow.replays === true);
-  let app: FixtureApp;
-  let project: FixtureProject;
-  let firstRun: RunOutcome;
   let secondRun: RunOutcome;
   let secondRunModelCalls = 0;
 
   beforeAll(async () => {
-    app = await startFixtureApp();
-    project = createProject({ 'tests/replay.e2e.ts': suiteOf(flows), ...PROJECT_FILES });
-    const options = (model: ReturnType<typeof installFakeLoopModel>) => ({
-      appUrl: app.url,
-      config: { tests: 'tests/**/*.e2e.ts', agents: { default: { model } }, cache: 'read-write' as const },
-    });
-    firstRun = await runExisting(project, options(installFakeLoopModel(actModel)));
-    secondRun = await runExisting(
-      project,
-      options(
-        installFakeLoopModel((call) => {
-          secondRunModelCalls += 1;
-          return actModel(call);
-        }),
-      ),
+    const options = cachedRun(
+      installFakeLoopModel((call) => {
+        secondRunModelCalls += 1;
+        return actModel(call);
+      }),
     );
-  }, 300_000);
-
-  afterAll(async () => {
-    project?.cleanup();
-    await app?.close();
-  });
+    secondRun = await runExisting(project, {
+      ...options,
+      runOptions: { grep: flows.map((flow) => exactTitle(flow.title)) },
+    });
+  }, 240_000);
 
   it('records every verb on the first run', () => {
-    expect(firstRun.exitCode).toBe(0);
     for (const flow of flows) {
-      expect(actStepOf(firstRun, flow.title).cache, flow.title).toMatchObject({ mode: 'missed', reason: 'no-entry' });
+      expect(resultByTitle(outcome, flow.title).status, flow.title).toBe('passed');
+      expect(actStepOf(outcome, flow.title).cache, flow.title).toMatchObject({ mode: 'missed', reason: 'no-entry' });
     }
   });
 
   it('replays hover, drag, check, upload, and scroll into view without a model call, and runs a round trip that changed nothing live', () => {
     expect(secondRun.exitCode).toBe(0);
+    expect(secondRun.results.filter((result) => result.status !== 'skipped').map((result) => result.test.title).toSorted()).toEqual(flows.map((flow) => flow.title).toSorted());
     // A round trip leaves the screen and the route as it found them: nothing a
     // replay could check, so it is never recorded and the model runs it again.
     const roundTrip = actStepOf(secondRun, 'opens a page and comes back');

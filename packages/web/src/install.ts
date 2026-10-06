@@ -1,28 +1,45 @@
 /** First-run browser provisioning for the Playwright engine. */
 
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { EngineError, InfrastructureError } from 'e2e/engine';
 import { browserType, type BrowserName } from './browser-connection.ts';
 
+/** Whether `chromium_headless_shell-<revision>` under `browsersPath` finished installing and holds its executable. */
+function headlessShellInstalled(browsersPath: string, revision: string): boolean {
+  const shellRoot = path.join(browsersPath, `chromium_headless_shell-${revision}`);
+  if (!existsSync(path.join(shellRoot, 'INSTALLATION_COMPLETE'))) return false;
+  const executable = process.platform === 'win32' ? 'chrome-headless-shell.exe' : 'chrome-headless-shell';
+  return readdirSync(shellRoot, { withFileTypes: true }).some(
+    (entry) => entry.isDirectory() && existsSync(path.join(shellRoot, entry.name, executable)),
+  );
+}
+
 /**
- * Whether the browser's executable exists on disk, or undefined when this
- * process cannot tell. Playwright resolves its browser cache from
- * `PLAYWRIGHT_BROWSERS_PATH` at module load, so the in-process check is only
- * authoritative when the run's environment agrees with this process's. A run
- * pointed at another cache is left to the CLI, which resolves against the
- * environment it is spawned with and is a no-op when nothing is missing.
+ * Whether the build the run launches (headless shell for headless chromium, else the full build)
+ * is on disk, or undefined when `env` points at another cache than this process loaded.
  */
-function isBrowserInstalled(name: BrowserName, env: NodeJS.ProcessEnv): boolean | undefined {
+function isBrowserInstalled(name: BrowserName, env: NodeJS.ProcessEnv, headed: boolean): boolean | undefined {
   if (env['PLAYWRIGHT_BROWSERS_PATH'] !== process.env['PLAYWRIGHT_BROWSERS_PATH']) return undefined;
   try {
-    return existsSync(browserType(name).executablePath());
+    const executable = browserType(name).executablePath();
+    if (headed || name !== 'chromium') return existsSync(executable);
+    return headlessShellAt(executable);
   } catch {
     return false;
   }
+}
+
+/** Whether the shell beside `executable`'s full build is installed. */
+function headlessShellAt(executable: string): boolean {
+  const marker = `${path.sep}chromium-`;
+  const at = executable.lastIndexOf(marker);
+  if (at === -1) return false;
+  const revision = executable.slice(at + marker.length).split(path.sep)[0] ?? '';
+  return revision !== '' && headlessShellInstalled(executable.slice(0, at), revision);
 }
 
 /** The `node` arguments that run the pinned `playwright-core` CLI with `args`. */
@@ -39,7 +56,10 @@ function playwrightCliArgs(args: readonly string[]): string[] {
  */
 export function runPlaywrightCli(args: readonly string[]): Promise<number> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, playwrightCliArgs(args), { stdio: 'inherit' });
+    const child = spawn(process.execPath, playwrightCliArgs(args), {
+      stdio: 'inherit',
+      env: installEnvironment(),
+    });
     const forward = (signal: NodeJS.Signals) => child.kill(signal);
     process.on('SIGINT', forward);
     process.on('SIGTERM', forward);
@@ -66,6 +86,8 @@ export interface InstallContext {
   readonly signal?: AbortSignal | undefined;
   /** Environment the installer runs with: the run's, so it fills the cache the workers will launch from. */
   readonly env: NodeJS.ProcessEnv;
+  /** Whether the run launches a window, which decides the chromium build it needs. */
+  readonly headed: boolean;
 }
 
 export interface EnsureBrowsersOptions {
@@ -86,6 +108,19 @@ export interface EnsureBrowsersOptions {
   readonly signal?: AbortSignal;
   /** The run's environment; defaults to this process's. */
   readonly env?: NodeJS.ProcessEnv;
+  /** Whether the run launches a window, which decides the chromium build it needs. Defaults to false. */
+  readonly headed?: boolean;
+}
+
+/** The `playwright install` arguments for `names`: `--only-shell` on a headless chromium run. */
+export function installArgs(names: readonly BrowserName[], headed: boolean): string[] {
+  if (headed || !names.includes('chromium')) return [...names];
+  return ['--only-shell', ...names];
+}
+
+/** `env` with `PLAYWRIGHT_SKIP_BROWSER_GC=1` unless already set, so an install keeps other tools' browsers. */
+function installEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return { ...env, PLAYWRIGHT_SKIP_BROWSER_GC: env['PLAYWRIGHT_SKIP_BROWSER_GC'] ?? '1' };
 }
 
 /**
@@ -101,7 +136,8 @@ export async function ensureBrowsersInstalled(
   options: EnsureBrowsersOptions = {},
 ): Promise<void> {
   const env = options.env ?? process.env;
-  const isInstalled = options.isInstalled ?? ((name: BrowserName) => isBrowserInstalled(name, env));
+  const headed = options.headed ?? false;
+  const isInstalled = options.isInstalled ?? ((name: BrowserName) => isBrowserInstalled(name, env, headed));
   const verdicts = new Map([...new Set(names)].map((name) => [name, isInstalled(name)] as const));
   const missing = [...verdicts.keys()].filter((name) => verdicts.get(name) !== true);
   if (missing.length === 0) return;
@@ -112,7 +148,7 @@ export async function ensureBrowsersInstalled(
   const log = options.log ?? ((line: string) => process.stderr.write(`${line}\n`));
   if (knownMissing) log(`Downloading missing Playwright browsers (first run): ${missing.join(', ')}...`);
   const install = options.install ?? runPlaywrightInstall;
-  await install(missing, { log, signal: options.signal, env });
+  await install(missing, { log, signal: options.signal, env: installEnvironment(env), headed });
   if (knownMissing) log('Browser download complete.');
 }
 
@@ -144,14 +180,14 @@ function forwardLines(stream: NodeJS.ReadableStream, log: (line: string) => void
 /** Spawns `node <playwright-core>/cli.js install <names>`, narrating its output through `log`. */
 function runPlaywrightInstall(
   names: readonly BrowserName[],
-  { log, signal, env }: InstallContext,
+  { log, signal, env, headed }: InstallContext,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted === true) {
       reject(new EngineError('CANCELLED', 'browser install cancelled', { retryable: false }));
       return;
     }
-    const child = spawn(process.execPath, playwrightCliArgs(['install', ...names]), {
+    const child = spawn(process.execPath, playwrightCliArgs(['install', ...installArgs(names, headed)]), {
       stdio: ['ignore', 'pipe', 'pipe'],
       env,
     });

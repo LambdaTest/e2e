@@ -3,7 +3,7 @@
 import { realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { compileGlob, compileGlobList, discoverFiles, GLOB_SYNTAX, literalPrefix, matchesGlob } from '../internal/globs.ts';
-import { CollectionError } from '../internal/errors.ts';
+import { CollectionError, isE2EError } from '../internal/errors.ts';
 import { setupTestId, testId } from '../internal/ids.ts';
 import { explainModuleError } from '../config/diagnose.ts';
 import { importModule } from '../config/load.ts';
@@ -492,6 +492,11 @@ export async function collect(
   };
 }
 
+/** A `CollectionError` from this module copy or the one a test file's imports loaded. */
+function isCollectionError(cause: unknown): cause is Error {
+  return isE2EError(cause) && cause.code === 'COLLECTION_ERROR';
+}
+
 /**
  * Imports each discovered file once in the collection realm. A collection
  * error in a selected file, or in any file of a run nothing narrowed, throws;
@@ -515,11 +520,11 @@ async function collectFiles(
       registration = await collectModule(() => importModule(absolutePath, 'collect'), absolutePath, redact);
     } catch (cause) {
       if (skippable) {
-        uncollected.push({ file, reason: cause instanceof CollectionError ? cause.message : explainModuleError(cause, absolutePath) });
+        uncollected.push({ file, reason: isCollectionError(cause) ? cause.message : explainModuleError(cause, absolutePath) });
         continue;
       }
       // A registration error names the option but not the module it came from.
-      if (cause instanceof CollectionError) throw new CollectionError(`${file}: ${cause.message}`, { cause });
+      if (isCollectionError(cause)) throw new CollectionError(`${file}: ${cause.message}`, { cause });
       throw new CollectionError(
         `failed to collect ${file}: ${explainModuleError(cause, absolutePath)}`,
         { cause },
@@ -528,7 +533,7 @@ async function collectFiles(
     try {
       files.push(collectFromRegistration(config.projectRoot, absolutePath, registration, isSelected(file), lines.get(file)));
     } catch (cause) {
-      if (!skippable || !(cause instanceof CollectionError)) throw cause;
+      if (!skippable || !isCollectionError(cause)) throw cause;
       uncollected.push({ file, reason: cause.message });
     }
   }

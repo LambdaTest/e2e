@@ -13,7 +13,8 @@ import type { CliOverrides, PortAssignments, ResolvedTarget } from '../../config
 import type { AiTraceSnapshot } from '../../internal/ai-trace.ts';
 import type { DebugSnapshot } from '../../internal/debug.ts';
 import type { SerializedError } from '../../internal/errors.ts';
-import type { ResultRecord, RunError, SerialGroupRecord, WireResultRecord } from '../records.ts';
+import type { AttemptRecord, ResultRecord, RunError, SerialGroupRecord, SerialMemberRecord, WireResultRecord } from '../records.ts';
+import type { SerialAttemptRun, SerialAttemptStart } from '../serial.ts';
 import type { StepProgress } from '../steps.ts';
 
 /** One runnable pair on the wire; the worker resolves the test function. */
@@ -118,7 +119,16 @@ export interface TerminateMessage {
   readonly type: 'terminate';
 }
 
-export type MainToWorker = RunUnitMessage | InterruptMessage | ShutdownMessage | TerminateMessage;
+/**
+ * Asks the worker to answer with `pong` from its event loop. The scheduler
+ * sends it only once an attempt is past its test timeout, to tell a worker
+ * still tearing the attempt down from one whose event loop is blocked.
+ */
+export interface PingMessage {
+  readonly type: 'ping';
+}
+
+export type MainToWorker = RunUnitMessage | InterruptMessage | ShutdownMessage | TerminateMessage | PingMessage;
 
 export interface ReadyMessage {
   readonly type: 'ready';
@@ -180,6 +190,38 @@ export interface NoticeMessage {
   readonly message: string;
 }
 
+/**
+ * An attempt's test timeout started: its `beforeEach` hooks and body run
+ * now. The worker enforces the timeout with its own timers, which a body
+ * that blocks the event loop never lets fire, so the scheduler keeps the
+ * deadline too; see `SchedulerWorker.watch`.
+ */
+export interface AttemptDeadlineMessage {
+  readonly type: 'attempt-deadline';
+  readonly testId: string;
+  readonly agent: string;
+  readonly repeat: number;
+  /** The attempt's index among the pair's attempts. */
+  readonly attempt: number;
+  /** The attempt's record id and start, which a watchdog kill reports it with. */
+  readonly attemptId: string;
+  readonly startedAt: string;
+  /** The test's resolved `timeout`. */
+  readonly timeoutMs: number;
+  /** How long past the timeout the worker may go without answering a `ping`: the cleanup budget. */
+  readonly graceMs: number;
+}
+
+/** The attempt the last `attempt-deadline` announced has ended, verdict and cleanup included. */
+export interface AttemptEndMessage {
+  readonly type: 'attempt-end';
+}
+
+/** The answer to `ping`. */
+export interface PongMessage {
+  readonly type: 'pong';
+}
+
 export interface ResultMessage {
   readonly type: 'result';
   readonly result: WireResultRecord;
@@ -188,6 +230,52 @@ export interface ResultMessage {
 export interface SerialGroupMessage {
   readonly type: 'serial-group';
   readonly group: SerialGroupRecord;
+}
+
+/**
+ * An attempt of an ordinary or setup pair begins, its realm and `beforeAll`
+ * hooks included. With `attempt`, it tells a crash during an attempt from
+ * one between attempts (an `afterAll` after the last one): only the first
+ * is charged a new attempt, with this index.
+ */
+export interface AttemptStartMessage {
+  readonly type: 'attempt-start';
+  readonly testId: string;
+  readonly agent: string;
+  readonly repeat: number;
+  readonly index: number;
+}
+
+/**
+ * One finished attempt of an ordinary or setup pair. A pair's result waits
+ * for its last attempt, so each attempt also goes out as it ends: a worker
+ * that dies during a retry must not take the attempts before it along. The
+ * result still carries every attempt; the scheduler keeps these only until
+ * it arrives.
+ */
+export interface AttemptMessage {
+  readonly type: 'attempt';
+  readonly testId: string;
+  readonly agent: string;
+  readonly repeat: number;
+  readonly attempt: AttemptRecord;
+}
+
+/** One member that finished in the serial group attempt running now; see `AttemptMessage`. */
+export interface SerialMemberMessage {
+  readonly type: 'serial-member';
+  /** The group's report id (`SerialGroupRecord.id`). */
+  readonly groupId: string;
+  readonly attempt: SerialAttemptStart;
+  readonly member: SerialMemberRecord;
+}
+
+/** One finished serial group attempt; see `AttemptMessage`. */
+export interface SerialAttemptMessage {
+  readonly type: 'serial-attempt';
+  /** The group's report id (`SerialGroupRecord.id`). */
+  readonly groupId: string;
+  readonly run: SerialAttemptRun;
 }
 
 export interface UnitDoneMessage {
@@ -232,10 +320,17 @@ export type WorkerToMain =
   | ReadyMessage
   | PairStartMessage
   | ProgressMessage
+  | AttemptDeadlineMessage
+  | AttemptEndMessage
+  | PongMessage
   | OutputMessage
   | NoticeMessage
   | ResultMessage
   | SerialGroupMessage
+  | AttemptStartMessage
+  | AttemptMessage
+  | SerialMemberMessage
+  | SerialAttemptMessage
   | UnitDoneMessage
   | ShutdownDoneMessage
   | FatalMessage

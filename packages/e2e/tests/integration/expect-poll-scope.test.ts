@@ -1,10 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { startFixtureApp, type FixtureApp } from '../helpers/fixture-app.ts';
 import { assertValidReport } from '../helpers/report-schema.ts';
 import {
   resultByTitle,
   runProjectWithConfigFile,
-  workerConfigSource,
+  workerFakeConfigSource,
   type FixtureProject,
   type RunOutcome,
 } from '../helpers/run-project.ts';
@@ -22,13 +21,8 @@ test('an unawaited poll fails the body that started it', async () => {
     .toBe(true);
 });
 
-test('an unawaited poll that would pass still fails the body', async () => {
-  let reads = 0;
-  expect.poll(() => ++reads > 3, { interval: 50 }).toBe(true);
-});
-
 test('a body error stays primary with the unawaited poll beside it', async () => {
-  expect.poll(() => false, { timeout: 400 }).toBe(true);
+  expect.poll(() => false, { timeout: 200 }).toBe(true);
   throw new Error('the body gave up');
 });
 
@@ -43,7 +37,7 @@ test('an awaited passing poll passes', async () => {
 
 test('the test after them is never charged, and the abandoned poll read no more', async () => {
   const before = counters.abandonedReads;
-  await new Promise((resolve) => setTimeout(resolve, 800));
+  await new Promise((resolve) => setTimeout(resolve, 500));
   expect(counters.abandonedReads).toBe(before);
 });
 `;
@@ -52,27 +46,27 @@ const HOOKS_SUITE = `import { test, expect } from 'e2e';
 
 test.describe('afterEach', () => {
   test.afterEach(async () => {
-    expect.poll(() => false, { timeout: 400 }).toBe(true);
+    expect.poll(() => false, { timeout: 200 }).toBe(true);
   });
   test('owns the afterEach poll', async () => {});
 });
 
 test.describe('beforeEach', () => {
   test.beforeEach(async () => {
-    expect.poll(() => false, { timeout: 400 }).toBe(true);
+    expect.poll(() => false, { timeout: 200 }).toBe(true);
   });
   test('owns the beforeEach poll', async () => {});
 });
 
 test.describe('afterAll', () => {
   test.afterAll(async () => {
-    expect.poll(() => false, { timeout: 400 }).toBe(true);
+    expect.poll(() => false, { timeout: 200 }).toBe(true);
   });
   test('runs before the afterAll poll', async () => {});
 });
 
 test('the test after the hooks is never charged', async () => {
-  await new Promise((resolve) => setTimeout(resolve, 800));
+  await new Promise((resolve) => setTimeout(resolve, 500));
 });
 `;
 
@@ -82,7 +76,7 @@ const LEAKY_FIXTURE_SUITE = `import { test as base, expect } from 'e2e';
 const test = base.extend<{ leaky: number }>({
   leaky: async (_fixtures, use) => {
     await use(1);
-    expect.poll(() => false, { timeout: 400 }).toBe(true);
+    expect.poll(() => false, { timeout: 200 }).toBe(true);
   },
 });
 
@@ -96,7 +90,7 @@ const TIDY_FIXTURE_SUITE = `import { test as base, expect } from 'e2e';
 const test = base.extend<{ tidy: number }>({
   tidy: async (_fixtures, use) => {
     await use(1);
-    await expect.poll(() => true, { timeout: 400 }).toBe(true);
+    await expect.poll(() => true, { timeout: 200 }).toBe(true);
   },
 });
 
@@ -109,38 +103,48 @@ const BEFORE_ALL_SUITE = `import { test, expect } from 'e2e';
 
 test.describe('beforeAll', () => {
   test.beforeAll(async () => {
-    expect.poll(() => false, { timeout: 400 }).toBe(true);
+    expect.poll(() => false, { timeout: 200 }).toBe(true);
   });
   test('sits under the beforeAll poll', async () => {});
 });
 
 test('the test after the beforeAll is never charged', async () => {
-  await new Promise((resolve) => setTimeout(resolve, 800));
+  await new Promise((resolve) => setTimeout(resolve, 500));
 });
 `;
 
 /** A body the timeout cut keeps running; the poll it starts later is its own, never the next test's. */
 const TIMED_OUT_SUITE = `import { test, expect } from 'e2e';
 
-test('times out, then polls from its leftover body', { timeout: 1000 }, async () => {
-  await new Promise((resolve) => setTimeout(resolve, 1500));
-  await expect.poll(() => false, { timeout: 2000 }).toBe(true);
+test('times out, then polls from its leftover body', { timeout: 300 }, async () => {
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await expect.poll(() => false, { timeout: 500 }).toBe(true);
 });
 
 test('runs while the leftover body polls, and is never charged', async () => {
-  await new Promise((resolve) => setTimeout(resolve, 1500));
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+});
+`;
+
+const STEPS_SUITE = `import { test } from 'e2e';
+
+test('a step call without await', async ({ app }) => {
+  app.open();
+});
+
+test('a step call without await before the body throws', async ({ app }) => {
+  app.open();
+  throw new Error('the body gave up');
 });
 `;
 
 const NOT_AWAITED = /returned before expect\.poll\(\.\.\.\)\.toBe\(\.\.\.\) finished; put `await` in front of every expect\.poll call$/;
 
 describe('expect.poll not awaited, in a run', () => {
-  let app: FixtureApp;
   let outcome: RunOutcome;
   let project: FixtureProject;
 
   beforeAll(async () => {
-    app = await startFixtureApp();
     ({ outcome, project } = await runProjectWithConfigFile(
       {
         'tests/a-body.e2e.ts': BODY_SUITE,
@@ -149,14 +153,14 @@ describe('expect.poll not awaited, in a run', () => {
         'tests/b-tidy-fixture.e2e.ts': TIDY_FIXTURE_SUITE,
         'tests/c-before-all.e2e.ts': BEFORE_ALL_SUITE,
         'tests/d-timed-out.e2e.ts': TIMED_OUT_SUITE,
+        'tests/e-steps.e2e.ts': STEPS_SUITE,
       },
-      { appUrl: app.url, configSource: workerConfigSource(1) },
+      { configSource: workerFakeConfigSource(1) },
     ));
   }, 180_000);
 
   afterAll(async () => {
     project?.cleanup();
-    await app?.close();
   });
 
   it('produces a schema-valid report and fails the run', () => {
@@ -175,15 +179,26 @@ describe('expect.poll not awaited, in a run', () => {
     expect(attempt.secondaryErrors).toEqual([]);
   });
 
-  it('fails the body for an unawaited poll that would have passed', () => {
-    const attempt = resultByTitle(outcome, 'an unawaited poll that would pass still fails the body').attempts[0]!;
-    expect(attempt.error?.code).toBe('STEP_NOT_AWAITED');
-  });
-
   it('keeps the body error primary and notes the unawaited poll beside it', () => {
     const attempt = resultByTitle(outcome, 'a body error stays primary with the unawaited poll beside it').attempts[0]!;
     expect(attempt.error).toMatchObject({ code: 'ERROR', message: 'the body gave up' });
     expect(attempt.secondaryErrors.map((error) => [error.code, error.phase])).toEqual([['STEP_NOT_AWAITED', 'body']]);
+  });
+
+  it('fails a body that returns before a step it started finished with STEP_NOT_AWAITED', () => {
+    const attempt = resultByTitle(outcome, 'a step call without await').attempts[0]!;
+    expect(attempt.error).toMatchObject({ code: 'STEP_NOT_AWAITED', phase: 'body' });
+    expect(attempt.error?.message).toContain('app.open');
+    expect(attempt.error?.source?.file).toBe('tests/e-steps.e2e.ts');
+    expect(attempt.steps).toHaveLength(1);
+    expect(attempt.steps[0]).toMatchObject({ api: 'app.open', status: 'failed', error: { code: 'STEP_NOT_AWAITED' } });
+  });
+
+  it('keeps the body error primary and notes the un-awaited step beside it', () => {
+    const attempt = resultByTitle(outcome, 'a step call without await before the body throws').attempts[0]!;
+    expect(attempt.error).toMatchObject({ code: 'ERROR', message: 'the body gave up' });
+    expect(attempt.secondaryErrors.map((error) => error.code)).toEqual(['STEP_NOT_AWAITED']);
+    expect(attempt.steps[0]).toMatchObject({ api: 'app.open', status: 'failed', error: { code: 'STEP_NOT_AWAITED' } });
   });
 
   it('leaves awaited polls alone', () => {

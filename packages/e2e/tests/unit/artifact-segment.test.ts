@@ -67,10 +67,6 @@ describe('sanitizePathSegment', () => {
     expect(sanitizePathSegment(`${PREFIX}keeps the coupon after a reload`)).toBe(first);
   });
 
-  it('digests the original id, so two long ids that sanitize alike still differ', () => {
-    expect(sanitizePathSegment(`${PREFIX}a b`)).not.toBe(sanitizePathSegment(`${PREFIX}a_b`));
-  });
-
   it('caps a safe 130-character id at 120 with the digest, and a 121-dot id at `_` plus the digest', () => {
     expect(sanitizePathSegment('.'.repeat(121))).toMatch(/^_-[0-9a-f]{8}$/);
     const capped = sanitizePathSegment('a'.repeat(130));

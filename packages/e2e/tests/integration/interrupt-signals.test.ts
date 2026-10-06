@@ -2,7 +2,8 @@
  * Ctrl-C against the built CLI, the way a terminal delivers it: SIGINT to the
  * whole process group, runner and workers alike. The engine is a file-logging
  * fake declared in the fixture config, so the test can see, from outside,
- * whether the engine was disposed and whether the worker outlived the runner.
+ * whether the engine was disposed, whether the runner released what its
+ * `prepare` acquired, and whether the worker outlived the runner.
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -41,6 +42,8 @@ export default {
     name: 'signal-fake',
     version: '1.0.0',
     spiVersion: 1,
+    async prepare() { log('prepare'); },
+    async finish() { log('finish'); },
     async init() { log('init'); },
     async startAttempt() { log('startAttempt'); },
     async endAttempt() { log('endAttempt'); },
@@ -270,7 +273,7 @@ describe('interrupt signals against the CLI', () => {
         expect(code).toBe(130);
         // Well inside the 60 s test timeout: the interrupt, not the timeout, ended the body.
         expect(elapsed).toBeLessThan(20_000);
-        expect(run.events()).toEqual(['init', 'startAttempt', 'test.start', 'endAttempt', 'dispose']);
+        expect(run.events()).toEqual(['prepare', 'init', 'startAttempt', 'test.start', 'endAttempt', 'dispose', 'finish']);
         expect(run.output()).toContain('interrupted: stopping the running test');
         expect(alive(run.workerPid)).toBe(false);
       }),
@@ -322,6 +325,7 @@ describe('interrupt signals against the CLI', () => {
         const pid = run.workerPid;
         await waitFor(() => !alive(pid), CLEANUP_TIMEOUT_MS + 5_000, 'the worker to exit');
         expect(run.events()).toContain('dispose');
+        expect(run.events().filter((event) => event === 'finish')).toEqual(['finish']);
       }),
     60_000,
   );

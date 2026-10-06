@@ -34,13 +34,10 @@ const HOOK = [
 const WITHOUT_AI = ['--import', `data:text/javascript,${encodeURIComponent(HOOK)}`];
 
 describe('the CLI without the ai package', () => {
-  it('is really without it: the hook fails the import the way a missing package does', async () => {
+  it('answers --version and --help', async () => {
     const script = "await import('ai').then(() => process.stdout.write('resolved'), (error) => process.stdout.write(error.code));";
     const { stdout } = await execFileAsync(process.execPath, [...WITHOUT_AI, '--input-type=module', '-e', script]);
     expect(stdout).toBe('ERR_MODULE_NOT_FOUND');
-  });
-
-  it('answers --version and --help', async () => {
     const version = await execFileAsync(process.execPath, [...WITHOUT_AI, CLI, '--version']);
     expect(version.stdout.trim()).toBe(VERSION);
     const help = await execFileAsync(process.execPath, [...WITHOUT_AI, CLI, '--help']);

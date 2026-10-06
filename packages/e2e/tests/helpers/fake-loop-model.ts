@@ -33,11 +33,15 @@ export interface LoopCall {
   readonly system: string;
   /** How the loop asked for tools: `required`, `auto`, or `tool:<name>` for a named tool. */
   readonly toolChoice: string;
+  /** The provider options of every tool call in the history, oldest first; `undefined` where a call carries none. */
+  readonly toolCallOptions: readonly unknown[];
 }
 
 export interface LoopToolCall {
   readonly toolName: string;
   readonly input: Record<string, unknown>;
+  /** Provider metadata on the call, such as a thought signature the provider needs back. */
+  readonly providerMetadata?: Record<string, Record<string, unknown>>;
 }
 
 /**
@@ -59,6 +63,7 @@ export const loopCalls: LoopCall[] = [];
 interface RawPart {
   readonly type: string;
   readonly text?: string;
+  readonly providerOptions?: unknown;
   readonly output?: { readonly type: string; readonly value?: unknown };
 }
 
@@ -104,6 +109,11 @@ export function installFakeLoopModel(respond: LoopResponder): ModelInstance {
           : options.toolChoice.type === 'tool'
             ? `tool:${options.toolChoice.toolName ?? ''}`
             : options.toolChoice.type,
+      toolCallOptions: options.prompt.flatMap((message) =>
+        message.role === 'assistant' && typeof message.content !== 'string'
+          ? message.content.filter((part) => part.type === 'tool-call').map((part) => part.providerOptions)
+          : [],
+      ),
     };
     loopCalls.push(call);
     const answer = respond(call);
@@ -112,6 +122,7 @@ export function installFakeLoopModel(respond: LoopResponder): ModelInstance {
       toolCallId: `scripted_${(callCounter += 1)}`,
       toolName: toolCall.toolName,
       input: JSON.stringify(toolCall.input),
+      ...(toolCall.providerMetadata === undefined ? {} : { providerMetadata: toolCall.providerMetadata }),
     });
     if (Array.isArray(answer)) {
       return scriptedResult(answer.map(toPart), 'tool-calls');

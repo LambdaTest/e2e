@@ -1,6 +1,7 @@
 ---
 title: Security model
 description: What the model can access, how the runner handles secrets, and the limits of its protections.
+icon: "shield-halved"
 ---
 
 Test code and configuration run with your operating-system permissions.
@@ -106,7 +107,9 @@ redaction and disables pixels for the rest of the attempt.
 After any secret fill, for the rest of the attempt, screenshot and pixel
 tools are unavailable, `app.screenshot()` is denied, and the runner omits
 assertion and failure screenshots. The app could display the value anywhere,
-beyond the field's masked rectangle.
+beyond the field's masked rectangle. An `act` or `vision: true` step whose
+semantic capture times out before the step does fails with `POLICY_DENIED`
+instead of reading a fallback screenshot.
 
 A test that restores a [session](#sessions) whose setup filled a secret keeps
 this protection. A setup that signs in without filling a secret, for example
@@ -130,7 +133,8 @@ password on screen is not masked in pixels.
 ### Redaction
 
 The runner replaces every occurrence of a registered secret value with
-`<secret:name>` in model input, reports, a worker process's console output,
+`<secret:name>` in model input, reports, what your code prints during
+`e2e run` (tests, the config's and test files' top-level code, reporters),
 trace text, and text downloads. That includes a value the test passes as a
 plain string rather than a `secrets.get()` handle: test and `describe`
 titles, step labels (an `app.open` URL, a locator's text), a `fill`, an
@@ -154,6 +158,9 @@ paths alike, is redacted once, before the model, an executor's tree, a
 replay cache descriptor, or an end anchor reads it. Redaction rewrites only
 what the runner reports; assertions still compare the text the page shows.
 Secret values and their cut parts never enter cache entries.
+
+Output printed while the config loads appears once it has loaded. If the
+load fails, that output is withheld, since the config's secrets are unknown.
 
 A static value shorter than 6 characters is `INVALID_CONFIG`, and a provider
 returning one fails the fill: every occurrence of so short a value would take

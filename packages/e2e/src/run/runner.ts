@@ -41,6 +41,8 @@ import { runUnits } from './scheduler.ts';
 import { buildWorkPlans, plannedSlots, type TargetWorkPlan } from './units.ts';
 import { SessionStore } from './sessions.ts';
 import { outputLayout } from './output.ts';
+import type { RunnerOutput } from './process-output.ts';
+import { registerStaticSecrets } from './secrecy.ts';
 import { claimRerunDir, pruneArtifacts } from './artifacts.ts';
 import { carryForward, lastFailedIds, readLastRun, reportArtifactPaths, type RerunCollection } from './last-run.ts';
 import { childProcessSpawner } from './worker/handle.ts';
@@ -156,6 +158,13 @@ export interface RunOptions {
   onEvent?: RunEventSink | undefined;
   /** Budget for each reporter's `onRunFinished`, in ms. Only the test harness sets it; there is no flag. */
   reporterTimeout?: number | undefined;
+  /**
+   * The process's stdout and stderr, when the caller claimed them (the CLI):
+   * what user code in this process prints is held while the config loads
+   * and shown through the list reporter while the run reports, and the list
+   * reporter writes to the terminal past it.
+   */
+  processOutput?: RunnerOutput | undefined;
 }
 
 /**
@@ -332,8 +341,17 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
   //
   // Free ports for URLs declared with port 0 are chosen here, once: workers
   // re-resolve the config and get the assignments in their bootstrap.
+  //
+  // The config's secrets are known to the process before what its top-level
+  // code printed is released, so that output is redacted like any other.
+  const loadConfig = async (): Promise<ResolvedConfig> => {
+    const config = await loadRunConfig(options, cwd, env, cli);
+    registerStaticSecrets(config.allSecrets);
+    return allocateAppPorts(config);
+  };
+  const processOutput = options.processOutput;
   const loaded = await debug
-    .time('config.load', () => loadRunConfig(options, cwd, env, cli).then(allocateAppPorts))
+    .time('config.load', () => (processOutput === undefined ? loadConfig() : processOutput.withholdDuring(loadConfig)))
     .then(
       (config) => ({ config, error: undefined }),
       (cause: unknown) => ({ config: undefined, error: classifyError(cause) }),
@@ -344,7 +362,13 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
   // the CLI asked for, so the failure renders through them.
   const reporterIds = loaded.config?.reporters ?? options.reporters ?? ['list'];
   const listReporter =
-    options.quiet === true || !reporterIds.includes('list') ? undefined : new ListReporter();
+    options.quiet === true || !reporterIds.includes('list') ? undefined : new ListReporter(processOutput?.listOutput);
+  // Until the run is over, what user code prints lands above the live window.
+  processOutput?.showThrough(
+    listReporter === undefined
+      ? undefined
+      : { show: (stream, text) => listReporter.processOutput(stream, text), end: () => listReporter.endProcessOutput() },
+  );
   const activeReporters: readonly Reporter[] = [
     ...(listReporter === undefined ? [] : [listReporter]),
     ...reporterIds.filter((id) => id !== 'list').map((id) => STATELESS_REPORTERS[id]),
@@ -527,6 +551,9 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
       ...(reportPath === undefined ? {} : { reportPath }),
       ...(aiTracePath === undefined ? {} : { aiTracePath }),
     });
+    // The list reporter has printed its summary and stopped its window; a
+    // line another reporter left unfinished on `run-finished` prints too.
+    processOutput?.showThrough(undefined);
     if (debug.enabled) {
       process.stderr.write(debug.summary());
       process.stderr.write(agentStepTable(results, serialGroups));
@@ -685,7 +712,7 @@ export async function run(options: RunOptions = {}): Promise<RunOutcome> {
     // of a worker's stderr fighting the live status block.
     try {
       plans = await debug.time('engine.prepare', () =>
-        prepareEngines(plans, runWorkers, engines, { runId, projectRoot: config.projectRoot, env, signal: interrupted, notice }, emit),
+        prepareEngines(plans, runWorkers, engines, { runId, projectRoot: config.projectRoot, env, signal: interrupted, headed: options.headed ?? false, notice }, emit),
       );
     } catch (cause) {
       if (!interrupted.aborted) recordFailure(cause, 'launch');

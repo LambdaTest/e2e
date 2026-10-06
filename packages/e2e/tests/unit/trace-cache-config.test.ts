@@ -67,17 +67,14 @@ const trace = (summary: string): ActionTrace => ({
 });
 
 describe('cache config resolution', () => {
-  it('is opt-out: unset defaults to read-write with the file store under .e2e/cache', () => {
+  it('is opt-out: unset defaults to read-write with the file store under .e2e/cache, or the configured dir', () => {
     const resolved = resolve(APP).cache;
     expect(resolved.mode).toBe('read-write');
     expect(resolved.store).toBeUndefined();
     expect(resolved.dir).toBe(path.join(ROOT, '.e2e', 'cache'));
-  });
-
-  it('defaults to read-only in CI and honors an explicit off', () => {
-    expect(resolve(APP, { ...BASE_ENV, CI: '1' }).cache.mode).toBe('read-only');
-    expect(resolve({ ...APP, cache: 'off' }).cache.mode).toBe('off');
-    expect(resolve({ ...APP, cache: 'off' }, { ...BASE_ENV, CI: '1' }).cache.mode).toBe('off');
+    expect(resolve({ ...APP, cache: { dir: 'shared' } }).cache.dir).toBe(path.join(ROOT, 'shared'));
+    expect(resolve({ ...APP, cache: { mode: 'read-only' } }).cache.mode).toBe('read-only');
+    expect(resolve({ ...APP, cache: { mode: 'off' } }).cache.mode).toBe('off');
   });
 
   it('lets the --no-cache override win over the config, even in CI', () => {
@@ -85,18 +82,10 @@ describe('cache config resolution', () => {
     expect(resolve(APP, { ...BASE_ENV, CI: '1' }, { cache: 'off' }).cache.mode).toBe('off');
   });
 
-  it('accepts the string shorthand and the options object', () => {
-    expect(resolve({ ...APP, cache: 'read-write' }).cache.mode).toBe('read-write');
-    const store = memoryStore();
-    const resolved = resolve({ ...APP, cache: { mode: 'read-only', store, dir: 'shared' } }).cache;
-    expect(resolved.mode).toBe('read-only');
-    expect(resolved.store).toBe(store);
-    expect(resolved.dir).toBe(path.join(ROOT, 'shared'));
-  });
-
-  it('demotes only an unset mode in CI; an explicit read-write is honored', () => {
+  it('demotes only an unset mode in CI; an explicit read-write or off is honored', () => {
     const ci = { ...BASE_ENV, CI: '1' };
     expect(resolve(APP, ci).cache.mode).toBe('read-only');
+    expect(resolve({ ...APP, cache: 'off' }, ci).cache.mode).toBe('off');
     expect(resolve({ ...APP, cache: { dir: 'shared' } }, ci).cache.mode).toBe('read-only');
     expect(resolve({ ...APP, cache: 'read-write' }, ci).cache.mode).toBe('read-write');
     expect(resolve({ ...APP, cache: { mode: 'read-write' } }, ci).cache.mode).toBe('read-write');

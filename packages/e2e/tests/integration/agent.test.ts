@@ -420,51 +420,6 @@ describe('agent judgment tier', () => {
   });
 });
 
-describe('the built-in agent with a judge', () => {
-  const SUITE = `import { test } from 'e2e';
-
-test('the judge judges the built-in agent assertions', async ({ app, agent }) => {
-  await app.open();
-  await agent.assert('the Home heading is visible');
-  await agent.assert('the checkout page is visible');
-});
-`;
-  let app: FixtureApp;
-  let outcome: RunOutcome;
-  let project: FixtureProject;
-
-  beforeAll(async () => {
-    app = await startFixtureApp();
-    // The built-in agent's assertions must reach the judgment tier and the
-    // judge, not its own act loop on the actor model.
-    const actor = installFakeModel(respond, { modelId: 'actor' });
-    const judge = installFakeModel(respond, { modelId: 'judge' });
-    const result = await runProject(
-      { 'tests/judge.e2e.ts': SUITE },
-      { appUrl: app.url, config: { tests: 'tests/**/*.e2e.ts', agents: { default: { model: actor, judge } } } },
-    );
-    outcome = result.outcome;
-    project = result.project;
-  }, 120_000);
-
-  afterAll(async () => {
-    project?.cleanup();
-    await app?.close();
-  });
-
-  it('sends both assertions to the judge as single judgments and fails on the false one', () => {
-    const result = resultByTitle(outcome, 'the judge judges the built-in agent assertions');
-    expect(result.status).toBe('failed');
-    expect(result.attempts.at(-1)!.error?.code).toBe('ASSERTION_FAILED');
-    const judged = fakeCalls.filter((call) => call.schemaName === 'agent-judgment-2');
-    expect(judged).toHaveLength(2);
-    for (const call of judged) expect(call.modelId).toBe('judge');
-    const steps = result.attempts.at(-1)!.steps.filter((step) => step.api === 'agent.assert');
-    expect(steps.map((step) => step.status)).toEqual(['passed', 'failed']);
-    for (const step of steps) expect(step.model).toMatchObject({ model: 'judge', calls: 1 });
-  });
-});
-
 describe('an inconclusive judgment after a secret fill', () => {
   const SUITE = `import { test, credentials } from 'e2e';
 

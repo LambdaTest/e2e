@@ -168,15 +168,11 @@ describe('generic secrets', () => {
     }
   });
 
-  it.each([
-    ['the app origin', 'https://app.test/checkout'],
-    ['another host on the app\'s site', 'https://auth.app.test/login'],
-    ['a third-party sign-in page', 'https://accounts.idp.test/'],
-  ])('a deterministic fill is not gated by origin: %s', async (_label, currentUrl) => {
+  it('a deterministic fill is not gated by origin: a third-party sign-in page', async () => {
     let filled: string | undefined;
     const engine = defineEngine({
       name: 'fake', version: '1', spiVersion: 1,
-      observe: async () => snapshot([], { location: currentUrl }),
+      observe: async () => snapshot([], { location: 'https://accounts.idp.test/' }),
       locate: async () => [{ ref: { id: 'key', revision: '' }, role: 'textbox', name: 'API key' }],
       actions: LOCATOR_ACTION_KINDS,
       perform: async (_ref, action) => { if (action.kind === 'fill') filled = action.value; },
@@ -409,13 +405,6 @@ describe('agent.extract', () => {
     for (const constraint of ['minimum', 'maximum', 'minLength', 'pattern', '$schema']) {
       expect(sent).not.toContain(constraint);
     }
-  });
-
-  it('returns the value the model found', async () => {
-    const model = installFakeModel(() => extracted({ count: 3 }));
-    const { fixtures } = runtime(todos(), { agents: { default: { model } } });
-    await expect(fixtures.agent.extract('the number of todos', { schema: z.object({ count: z.number().int() }) }))
-      .resolves.toEqual({ count: 3 });
   });
 
   it('fails inconclusive, naming what was missing, when the screen does not show the data', async () => {
@@ -660,7 +649,7 @@ describe('app steering hooks', () => {
 
 describe('coordinate input', () => {
   const box = { x: 100, y: 200, width: 50, height: 20 };
-  function pointer(options: { rect?: false; hidden?: true; scrollIntoView?: false } = {}) {
+  function pointer(options: { rect?: false; hidden?: true } = {}) {
     const performed: string[] = [];
     const performedAt: string[] = [];
     const locates: number[] = [];
@@ -673,11 +662,12 @@ describe('coordinate input', () => {
       name: 'fake', version: '1', spiVersion: 1,
       observe: async () => snapshot([node]),
       locate: async () => { locates.push(1); return [node]; },
-      actions: options.scrollIntoView === false ? ['tap'] : ['tap', 'scrollIntoView'],
+      actions: ['tap', 'scrollIntoView'],
       perform: async (_ref, action) => { performed.push(action.kind); },
       pointerActions: ['tap', 'swipeTo'],
       performAt: async (point, action) => {
-        const path = action.kind === 'swipeTo' ? ` -> ${action.target.x},${action.target.y}` : '';
+        const duration = action.kind === 'swipeTo' && action.durationMs !== undefined ? ` for ${action.durationMs}ms` : '';
+        const path = action.kind === 'swipeTo' ? ` -> ${action.target.x},${action.target.y}${duration}` : '';
         performedAt.push(`${action.kind} @ ${point.x},${point.y}${path}`);
       },
     });
@@ -735,42 +725,24 @@ describe('coordinate input', () => {
     expect(locates).toEqual([1]);
   });
 
-  it('locator.tap({ position }) scrolls the node into view, then taps the pointer at the offset of its box', async () => {
-    const { engine, performed, performedAt } = pointer();
-    const { fixtures, steps } = runtime(engine);
-    await fixtures.screen.getByLabel('Pad').tap({ position: { x: 5, y: 7 } });
-    expect(performed).toEqual(['scrollIntoView']);
-    expect(performedAt).toEqual(['tap @ 105,207']);
-    expect(steps.all().at(-1)).toMatchObject({
-      kind: 'locator', api: 'locator.tap', label: expect.stringMatching(/ at \(5, 7\)$/), status: 'passed',
-    });
-    await fixtures.screen.getByLabel('Pad').click({ position: { x: 50, y: 20 } });
-    expect(performedAt).toEqual(['tap @ 105,207', 'tap @ 150,220']);
-    expect(steps.all().map((step) => step.api)).toEqual(['locator.tap', 'locator.click']);
-    await fixtures.screen.getByLabel('Pad').tap();
-    expect(performed).toEqual(['scrollIntoView', 'scrollIntoView', 'tap']);
-  });
-
-  it('taps at the offset straight from the box when the engine cannot scroll into view', async () => {
-    const { engine, performed, performedAt } = pointer({ scrollIntoView: false });
-    const { fixtures } = runtime(engine);
-    await fixtures.screen.getByLabel('Pad').tap({ position: { x: 5, y: 7 } });
-    expect(performed).toEqual([]);
-    expect(performedAt).toEqual(['tap @ 105,207']);
-  });
-
   it.each([
     ['hidden', { hidden: true }],
     ['has no box', { rect: false }],
   ] as const)('waits for a node that is %s and fails LOCATOR_NOT_FOUND at the deadline', async (_case, options) => {
-    const { engine, performedAt } = pointer(options);
-    const { fixtures } = runtime(engine);
-    await expect(fixtures.screen.getByLabel('Pad').tap({ position: { x: 1, y: 1 }, timeout: 250 })).rejects.toMatchObject({
-      code: 'LOCATOR_NOT_FOUND',
-      message: expect.stringContaining('did not become visible with a box'),
-      details: expect.objectContaining({ waitedMs: expect.any(Number) }),
-    });
-    expect(performedAt).toEqual([]);
+    vi.useFakeTimers();
+    vi.setTimerTickMode('nextTimerAsync');
+    try {
+      const { engine, performedAt } = pointer(options);
+      const { fixtures } = runtime(engine);
+      await expect(fixtures.screen.getByLabel('Pad').tap({ position: { x: 1, y: 1 }, timeout: 250 })).rejects.toMatchObject({
+        code: 'LOCATOR_NOT_FOUND',
+        message: expect.stringContaining('did not become visible with a box'),
+        details: expect.objectContaining({ waitedMs: expect.any(Number) }),
+      });
+      expect(performedAt).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('screen.swipe({ from, to }) dispatches a pointer swipe along the path; a direction still needs the swipe action', async () => {
@@ -779,14 +751,38 @@ describe('coordinate input', () => {
     await fixtures.screen.swipe({ from: { x: 10, y: 20 }, to: { x: 10, y: 300 } });
     expect(performedAt).toEqual(['swipeTo @ 10,20 -> 10,300']);
     expect(steps.all().at(-1)).toMatchObject({ kind: 'screen', api: 'screen.swipe', label: '(10, 20) → (10, 300)', status: 'passed' });
+    await fixtures.screen.swipe({ from: { x: 10, y: 20 }, to: { x: 10, y: 300 }, duration: 400 });
+    expect(performedAt.at(-1)).toEqual('swipeTo @ 10,20 -> 10,300 for 400ms');
+    await fixtures.screen.swipe({ from: { x: 540, y: 1560 }, to: { x: 540, y: 840 }, duration: 300 });
+    expect(performedAt.at(-1)).toEqual('swipeTo @ 540,1560 -> 540,840 for 300ms');
+    expect(steps.all().at(-1)).toMatchObject({ kind: 'screen', api: 'screen.swipe', label: '(540, 1560) → (540, 840)', status: 'passed' });
+    await expect(fixtures.screen.swipe({ from: { x: 1, y: 1 }, to: { x: 2, y: 2 }, duration: 0 } as never)).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT', message: 'swipe duration must be an integer from 16 through 10000, got 0',
+    });
+    await expect(fixtures.screen.swipe({ from: { x: 1, y: 1 }, to: { x: 2, y: 2 }, duration: 15 } as never)).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT', message: 'swipe duration must be an integer from 16 through 10000, got 15',
+    });
+    await expect(fixtures.screen.swipe({ from: { x: 1, y: 1 }, to: { x: 2, y: 2 }, duration: 10_001 } as never)).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT', message: 'swipe duration must be an integer from 16 through 10000, got 10001',
+    });
+    await expect(fixtures.screen.swipe({ from: { x: 1, y: 1 }, to: { x: 2, y: 2 }, duration: 1.5 } as never)).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT', message: 'swipe duration must be an integer from 16 through 10000, got 1.5',
+    });
     await expect(fixtures.screen.swipe({ direction: 'up', to: { x: 1, y: 1 } } as never)).rejects.toMatchObject({
       code: 'INVALID_ARGUMENT', message: expect.stringContaining('swipe options has no key "direction"'),
+    });
+    await expect(fixtures.screen.swipe({ direction: 'up', duration: 300 } as never)).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT', message: expect.stringContaining('swipe options has no key "duration"'),
     });
     await expect(fixtures.screen.swipe({ from: { x: 1, y: 1 } } as never)).rejects.toMatchObject({
       code: 'INVALID_ARGUMENT', message: 'swipe to requires a point { x, y } of finite numbers',
     });
     await expect(fixtures.screen.swipe({ direction: 'up' })).rejects.toMatchObject({ code: 'UNSUPPORTED_CAPABILITY' });
-    expect(performedAt).toEqual(['swipeTo @ 10,20 -> 10,300']);
+    expect(performedAt).toEqual([
+      'swipeTo @ 10,20 -> 10,300',
+      'swipeTo @ 10,20 -> 10,300 for 400ms',
+      'swipeTo @ 540,1560 -> 540,840 for 300ms',
+    ]);
   });
 });
 

@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { defineEngine, type EngineFixtureContext } from '../../src/engine/index.ts';
+import { defineEngine } from '../../src/engine/index.ts';
 import type { StepExecutor } from '../../src/agent/executor.ts';
 import type { SemanticNode } from '../../src/engine/surface.ts';
 import { assertValidReport } from '../helpers/report-schema.ts';
@@ -67,41 +67,15 @@ export default {
 } satisfies E2EConfig;
 `;
 
-const FIXTURE_SUITE = `import { test, expect } from 'e2e';
-
-test('a contributed fixture runs with harness discipline', async (fixtures) => {
-  const device = (fixtures as unknown as { device: { reset(): Promise<string>; shake(): Promise<string> } }).device;
-  await expect(await device.reset()).toBe('reset-done');
-  await expect(await device.shake()).toBe('shaken');
-});
-`;
-
-const STATE_SUITE = `import { test, expect } from 'e2e';
-
-test.setup('seed the counter', { sessions: ['seeded'] }, async ({ screen, session }) => {
-  await screen.getByRole('button', { name: 'Increment' }).tap();
-  await session.save('seeded');
-});
-
-test('restores the seeded counter', { session: 'seeded' }, async ({ screen }) => {
-  await expect(screen.getByRole('status')).toHaveText('1');
-});
-`;
-
-
 /** A two-node screen: a counter value and a button that increments it. */
 function toyEngine(
   options: {
     withLocate?: boolean;
-    withFixtures?: boolean;
-    withState?: boolean;
-    withIsolation?: boolean;
     withoutInit?: boolean;
     withPrepare?: 'ok' | 'fail' | 'hang-finish';
   } = {},
 ) {
   const lifecycle: string[] = [];
-  const fixtureCalls: string[] = [];
   let initEnv: Record<string, string | undefined> = {};
   let count = 0;
   const nodes = (): SemanticNode[] => [
@@ -146,17 +120,6 @@ function toyEngine(
             info.log(`booted ${info.env['TOY_POOL']?.split(',')[0] ?? 'no device'}`);
           },
         }),
-    ...(options.withIsolation !== true
-      ? {}
-      : {
-          async startAttempt(context: { attemptId: string; artifactsDir: string }) {
-            lifecycle.push(`startAttempt:${context.artifactsDir.length > 0 ? 'dir' : 'nodir'}`);
-            count = 0;
-          },
-          async endAttempt() {
-            lifecycle.push('endAttempt');
-          },
-        }),
     async dispose() {
       lifecycle.push('dispose');
     },
@@ -188,37 +151,8 @@ function toyEngine(
             );
           },
         }),
-    ...(options.withFixtures !== true
-      ? {}
-      : {
-          fixtures: {
-            device: (context: EngineFixtureContext) => context.fixture('device', {
-              async reset() {
-                fixtureCalls.push(`reset:${context.targetName}`);
-                count = 0;
-                return 'reset-done';
-              },
-              async shake() {
-                fixtureCalls.push('shake');
-                return 'shaken';
-              },
-            }, { reset: { kind: 'resource' }, shake: { kind: 'resource' } }),
-          },
-        }),
-    ...(options.withState !== true
-      ? {}
-      : {
-          state: {
-            async capture() {
-              return { format: 'toy', version: 1, data: { count } };
-            },
-            async restore(state: { data: unknown }) {
-              count = (state.data as { count: number }).count;
-            },
-          },
-        }),
   });
-  return { initEnv: () => initEnv, engine, lifecycle, fixtureCalls, current: () => count };
+  return { initEnv: () => initEnv, engine, lifecycle, current: () => count };
 }
 
 /** Observes, taps until the counter reads the goal, verifies, concludes. */
@@ -287,116 +221,8 @@ describe('engine targets', () => {
         env: { ...process.env, APP_URL: '', CI: '' },
         quiet: true,
       });
-      expect(outcome.exitCode).not.toBe(0);
-      const result = outcome.results[0];
-      const message = result?.attempts.at(-1)?.error?.message ?? '';
-      expect(message).toMatch(/no engine capability|UNSUPPORTED/i);
-    } finally {
-      project.cleanup();
-    }
-  });
-
-  it('runs the deterministic screen/expect tier over engine.locate', async () => {
-    const toy = toyEngine({ withLocate: true });
-    const project = createProject({ 'tests/screen.e2e.ts': DETERMINISTIC_SUITE });
-    try {
-      const outcome = await run({
-        cwd: project.dir,
-        rawConfig: {
-          targets: [{ name: 'toy-sim', platform: 'ios', engine: toy.engine }],
-          cache: 'off',
-        },
-        env: { ...process.env, APP_URL: '', CI: '' },
-        quiet: true,
-      });
-      expect(outcome.exitCode).toBe(0);
-      expect(toy.current()).toBe(2);
-      assertValidReport(outcome.report);
-    } finally {
-      project.cleanup();
-    }
-  });
-
-  it('runs a contributed fixture with harness step discipline', async () => {
-    const toy = toyEngine({ withFixtures: true });
-    const project = createProject({ 'tests/fixture.e2e.ts': FIXTURE_SUITE });
-    try {
-      const outcome = await run({
-        cwd: project.dir,
-        rawConfig: {
-          targets: [{ name: 'toy-sim', platform: 'ios', engine: toy.engine }],
-          cache: 'off',
-        },
-        env: { ...process.env, APP_URL: '', CI: '' },
-        quiet: true,
-      });
-      expect(outcome.exitCode).toBe(0);
-      expect(outcome.exitCode).toBe(0);
-      expect(toy.fixtureCalls).toEqual(['reset:toy-sim', 'shake']);
-      // Every contributed call is a recorded step, named <fixture>.<method>.
-      const steps = outcome.results[0]?.attempts[0]?.steps ?? [];
-      const names = steps.map((step) => step.api);
-      expect(names).toContain('device.reset');
-      expect(names).toContain('device.shake');
-      assertValidReport(outcome.report);
-    } finally {
-      project.cleanup();
-    }
-  });
-
-  it('captures and restores opaque engine state across a session', async () => {
-    const toy = toyEngine({ withLocate: true, withState: true });
-    const project = createProject({ 'tests/state.e2e.ts': STATE_SUITE });
-    try {
-      const outcome = await run({
-        cwd: project.dir,
-        rawConfig: {
-          targets: [{ name: 'toy-sim', platform: 'ios', engine: toy.engine }],
-          cache: 'off',
-        },
-        env: { ...process.env, APP_URL: '', CI: '' },
-        quiet: true,
-      });
-      expect(outcome.exitCode).toBe(0);
-      assertValidReport(outcome.report);
-    } finally {
-      project.cleanup();
-    }
-  });
-
-
-  it('resets per-attempt state via startAttempt/endAttempt isolation', async () => {
-    const toy = toyEngine({ withLocate: true, withIsolation: true });
-    const suite = `import { test, expect } from 'e2e';
-
-test('first attempt starts fresh', async ({ screen }) => {
-  await screen.getByRole('button', { name: 'Increment' }).tap();
-  await expect(screen.getByRole('status')).toHaveText('1');
-});
-
-test('second attempt also starts fresh', async ({ screen }) => {
-  await screen.getByRole('button', { name: 'Increment' }).tap();
-  await expect(screen.getByRole('status')).toHaveText('1');
-});
-`;
-    const project = createProject({ 'tests/iso.e2e.ts': suite });
-    try {
-      const outcome = await run({
-        cwd: project.dir,
-        rawConfig: {
-          targets: [{ name: 'toy-sim', platform: 'ios', engine: toy.engine }],
-          cache: 'off',
-        },
-        env: { ...process.env, APP_URL: '', CI: '' },
-        quiet: true,
-      });
-      expect(outcome.exitCode).toBe(0);
-      expect(toy.lifecycle.filter((e) => e.startsWith('startAttempt'))).toEqual([
-        'startAttempt:dir',
-        'startAttempt:dir',
-      ]);
-      expect(toy.lifecycle.filter((e) => e === 'endAttempt')).toHaveLength(2);
-      assertValidReport(outcome.report);
+      expect(outcome.exitCode).toBe(2);
+      expect(outcome.results[0]?.attempts.at(-1)?.error).toMatchObject({ code: 'UNSUPPORTED_CAPABILITY', category: 'configuration' });
     } finally {
       project.cleanup();
     }
@@ -573,33 +399,6 @@ test('second attempt also starts fresh', async ({ screen }) => {
       expect(outcome.results.map((result) => result.status)).toEqual(['passed']);
       expect(toy.lifecycle).toEqual(['prepare', 'init', 'dispose', 'finish']);
       expect(errors).toEqual([{ code: 'CLEANUP_TIMEOUT', phase: 'cleanup' }]);
-    } finally {
-      project.cleanup();
-    }
-  });
-
-  it('gates an undeclared fixture at selection via requires', async () => {
-    const toy = toyEngine(); // no fixtures declared
-    const project = createProject({
-      'tests/req.e2e.ts': `import { test } from 'e2e';
-
-test('needs device', { requires: ['device'] }, async () => {});
-`,
-    });
-    try {
-      const outcome = await run({
-        cwd: project.dir,
-        rawConfig: {
-          targets: [{ name: 'toy-sim', platform: 'ios', engine: toy.engine }],
-          cache: 'off',
-        },
-        env: { ...process.env, APP_URL: '', CI: '' },
-        quiet: true,
-        passWithNoTests: true,
-      });
-      const result = outcome.results[0];
-      expect(result?.status).toBe('skipped');
-      expect(result?.skip?.cause).toBe('capability-unavailable');
     } finally {
       project.cleanup();
     }

@@ -1,6 +1,6 @@
 /** expect.poll: re-reads a value until a synchronous matcher passes. */
 
-import { ConfigurationError, E2EError, TestError } from '../internal/errors.ts';
+import { ConfigurationError, E2EError, isE2EError, TestError } from '../internal/errors.ts';
 import { Deadline, POLL_INTERVAL_MS, sleep, withAbort, withTimeout } from '../internal/time.ts';
 import type { PollExpectation, PollOptions, ValueExpectation, ValueMatcherName } from '../types.ts';
 import { currentAttempt } from './attempt.ts';
@@ -48,7 +48,7 @@ function describeError(error: unknown): string {
 }
 
 function isNotYet(error: unknown): boolean {
-  return error instanceof E2EError && error.code === 'ASSERTION_FAILED';
+  return isE2EError(error) && error.code === 'ASSERTION_FAILED';
 }
 
 function cancelled(): E2EError {

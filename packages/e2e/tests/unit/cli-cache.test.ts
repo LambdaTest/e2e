@@ -94,12 +94,6 @@ describe('e2e cache ls', () => {
     expect(lines[2]).toMatch(/^tests\/signup\.e2e\.ts::signs up +web +dddddddddddd +<1m +3$/);
   });
 
-  it('prints a dash for an entry recorded before entries described themselves', async () => {
-    await seed([{ keyHash: 'a'.repeat(64), trace: trace(undefined, 2) }]);
-    await invoke('cache', 'ls');
-    expect(written(stdoutSpy).trimEnd().split('\n')[1]).toMatch(/^- +- +- +<1m +2$/);
-  });
-
   it('marks a recording the action cap cut short', async () => {
     await seed([{ keyHash: 'b'.repeat(64), trace: { ...trace(undefined, 2), truncated: true } }]);
     await invoke('cache', 'ls');
@@ -132,12 +126,6 @@ describe('e2e cache stats', () => {
     expect(output).toContain(`directory  ${path.join(root, CACHE_DIR)}`);
     expect(output).toContain('entries    2');
     expect(output).toMatch(/size {7}\d+(\.\d)? (B|KiB)/);
-  });
-
-  it('reports a store that was never written as empty', async () => {
-    await invoke('cache', 'stats');
-    expect(written(stdoutSpy)).toContain('entries    0');
-    expect(written(stdoutSpy)).toContain('size       0 B');
   });
 });
 

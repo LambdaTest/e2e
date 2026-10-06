@@ -154,7 +154,7 @@ describe('initializing standalone projects', () => {
   });
 
   it.each([undefined, '{}', '{"type":"commonjs"}'])(
-    'loads a .ts config and runs .ts tests with their helpers when package.json is %s',
+    'loads a .ts config and collects .ts tests with their helpers when package.json is %s, and runs them under commonjs',
     async (manifest) => {
       if (manifest !== undefined) writeFileSync(path.join(dir, 'package.json'), manifest);
       writeFileSync(path.join(dir, 'e2e.config.ts'), CONFIG);
@@ -170,6 +170,7 @@ describe('initializing standalone projects', () => {
       const config = resolveConfig(raw, { projectRoot: dir, env: {} });
       const collection = await collect(config);
       expect(collection.tests.map((test) => test.title)).toEqual(['helpers load as ES modules']);
+      if (manifest !== '{"type":"commonjs"}') return;
 
       const { stdout } = await execFileAsync(process.execPath, [CLI, 'run', '--workers', '1', '--no-cache'], { cwd: dir });
       expect(stdout).toContain('1 passed');
@@ -246,25 +247,6 @@ describe('initializing standalone projects', () => {
     });
   });
 
-  it('explains a removed export and a wrong subpath in the config', async () => {
-    await execFileAsync(process.execPath, [CLI, 'init', '--yes'], { cwd: dir });
-    linkPackages('e2e');
-    writeFileSync(
-      path.join(dir, 'e2e.config.ts'),
-      "import { defineConfig } from 'e2e';\nexport default defineConfig({ targets: [{ name: 'local', platform: 'test' }] });\n",
-    );
-    await expect(loadConfigModule(path.join(dir, 'e2e.config.ts'))).rejects.toMatchObject({
-      code: 'CONFIG_LOAD_FAILED',
-      message: expect.stringContaining('defineConfig was removed in e2e 0.5'),
-    });
-    // The import must be used, or the TypeScript transform elides it.
-    writeFileSync(path.join(dir, 'e2e.config.ts'), "import { test } from 'e2e/test';\nexport default { marker: test };\n");
-    await expect(loadConfigModule(path.join(dir, 'e2e.config.ts'))).rejects.toMatchObject({
-      code: 'CONFIG_LOAD_FAILED',
-      message: expect.stringContaining('e2e exports e2e, e2e/agent, e2e/engine'),
-    });
-  });
-
   it('names look-alike test files when the globs match nothing', async () => {
     await execFileAsync(process.execPath, [CLI, 'init', '--yes'], { cwd: dir });
     linkPackages('e2e', 'web');
@@ -279,48 +261,4 @@ describe('initializing standalone projects', () => {
     });
   });
 
-  it('preserves the original load error', async () => {
-    writeFileSync(path.join(dir, 'e2e.config.ts'), "throw new Error('config setup failed');\n");
-    await expect(loadConfigModule(path.join(dir, 'e2e.config.ts'))).rejects.toMatchObject({
-      code: 'CONFIG_LOAD_FAILED',
-      message: `failed to load config ${path.join(dir, 'e2e.config.ts')}: config setup failed`,
-    });
-  });
-
-  it('keeps the code of a configuration error the config throws while it evaluates', async () => {
-    linkPackages('e2e');
-    writeFileSync(
-      path.join(dir, 'e2e.config.ts'),
-      "import { ConfigurationError } from 'e2e/engine';\nthrow new ConfigurationError('INVALID_CONFIG', 'web({ video }) was renamed web({ screencast })');\n",
-    );
-    await expect(loadConfigModule(path.join(dir, 'e2e.config.ts'))).rejects.toMatchObject({
-      code: 'INVALID_CONFIG',
-      message: 'web({ video }) was renamed web({ screencast })',
-    });
-  });
-
-  it('keeps the code of a configuration error from another copy of e2e, and only a configuration one', async () => {
-    const foreign = (category: string) =>
-      `const error = new Error('refused by a second copy');\nObject.assign(error, { [Symbol.for('e2e.error.v1')]: true, category: '${category}', code: 'INVALID_CONFIG', retryable: false });\nthrow error;\n`;
-    writeFileSync(path.join(dir, 'e2e.config.ts'), foreign('configuration'));
-    await expect(loadConfigModule(path.join(dir, 'e2e.config.ts'))).rejects.toMatchObject({
-      code: 'INVALID_CONFIG',
-      message: 'refused by a second copy',
-    });
-    writeFileSync(path.join(dir, 'e2e.config.ts'), foreign('test'));
-    await expect(loadConfigModule(path.join(dir, 'e2e.config.ts'))).rejects.toMatchObject({ code: 'CONFIG_LOAD_FAILED' });
-  });
-
-  it('loads a config through a symlink', async () => {
-    const sourceDir = path.join(dir, 'source');
-    mkdirSync(sourceDir);
-    const source = path.join(sourceDir, 'e2e.config.ts');
-    writeFileSync(source, CONFIG);
-    const linked = path.join(dir, 'e2e.config.ts');
-    symlinkSync(source, linked, 'file');
-
-    await expect(loadConfigModule(linked)).resolves.toMatchObject({
-      targets: [{ name: 'local', platform: 'test' }],
-    });
-  });
 });

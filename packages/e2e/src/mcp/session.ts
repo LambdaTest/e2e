@@ -23,7 +23,7 @@ import { LocatorEngine } from '../locator/engine.ts';
 import { allocateAppPorts } from '../run/app-ports.ts';
 import { SharedAppProcesses } from '../run/process-pool.ts';
 import { outputLayout } from '../run/output.ts';
-import { sessionSecrecy } from '../run/secrecy.ts';
+import { processSecrets, registerStaticSecrets, sessionSecrecy } from '../run/secrecy.ts';
 import { openStandaloneAttempt, type StandaloneAttempt } from '../run/standalone.ts';
 import type { AgentParams } from '../types.ts';
 import { createSessionCatalog, isGrammarVerb, type SessionCatalog } from './catalog.ts';
@@ -47,6 +47,7 @@ interface LiveSession {
   readonly id: string;
   readonly target: ResolvedTarget;
   readonly configPath: string;
+  readonly headed: boolean;
   readonly attempt: StandaloneAttempt;
   readonly step: InteractiveStep;
   readonly screen: ScreenPresenter;
@@ -65,6 +66,8 @@ export interface OpenSessionOptions {
   readonly target?: string | undefined;
   /** A config file to load instead of the server's default, relative to the server's directory. */
   readonly config?: string | undefined;
+  /** Whether this session shows its UI; otherwise the server's `headed`. */
+  readonly headed?: boolean | undefined;
 }
 
 export interface SessionHostOptions {
@@ -72,7 +75,10 @@ export interface SessionHostOptions {
   readonly locateConfig: (configPath: string | undefined) => string;
   /** Loads the config at an absolute path fresh for each session, so an edited config applies without a restart. */
   readonly loadConfig: (configPath: string) => Promise<LoadedConfig>;
+  /** Holds what the process prints while `load` evaluates a config and registers its secrets; by default nothing is held. */
+  readonly withholdOutput?: (<T>(load: () => Promise<T>) => Promise<T>) | undefined;
   readonly env: NodeJS.ProcessEnv;
+  /** Whether a session shows its UI when `open_session` does not say, from `--headed`. */
   readonly headed: boolean;
   /** The target every session opens on, from `--target`; a call may still name one. */
   readonly defaultTarget?: string | undefined;
@@ -105,9 +111,14 @@ export class SessionHost {
     return this.options.maxSessions ?? SESSION_BOUNDS.default;
   }
 
-  /** The server's tools: the same four whatever the project, the config, or the target. */
+  /** The server's tools: the same four whatever the project, the config, or the target, each redacting what it returns. */
   toolSpecs(): readonly McpToolSpec[] {
-    return [this.openSpec(), this.catalogSpec(), this.callSpec(), this.closeSpec()];
+    return [this.openSpec(), this.catalogSpec(), this.callSpec(), this.closeSpec()].map(redacting);
+  }
+
+  /** Logs a line for the operator and the client, redacted with every secret value the process knows. */
+  private log(level: 'info' | 'warning' | 'error', message: string): void {
+    this.options.log(level, processSecrets.redact(message));
   }
 
   /**
@@ -116,8 +127,9 @@ export class SessionHost {
    * it, or disconnects, aborts the open and what it started.
    */
   open(options: OpenSessionOptions, signal?: AbortSignal): Promise<string> {
-    const usage = new SessionUsage(this.sessions.liveCount, this.options.headed);
-    return this.sessions.admit((id) => this.openSession(id, options, usage, signal)).catch((cause: unknown) => {
+    const headed = options.headed ?? this.options.headed;
+    const usage = new SessionUsage(this.sessions.liveCount, headed);
+    return this.sessions.admit((id) => this.openSession(id, options, headed, usage, signal)).catch((cause: unknown) => {
       this.options.onSessionEnd?.(usage.openFailed(classifyError(cause).code));
       throw cause;
     });
@@ -148,7 +160,8 @@ export class SessionHost {
     if (value.saved !== undefined) lines.push(value.saved);
     if (value.outcome.error !== undefined) lines.push(`The session step ended with: ${errorMessage(value.outcome.error)}`);
     for (const error of cleanupErrors) lines.push(`Cleanup: ${error.code}: ${error.message}`);
-    return lines.join('\n');
+    // Redacted here, not only at the tool boundary: closeAll writes it to stderr.
+    return processSecrets.redact(lines.join('\n'));
   }
 
   /**
@@ -209,7 +222,13 @@ export class SessionHost {
     );
   }
 
-  private async openSession(id: string, options: OpenSessionOptions, usage: SessionUsage, request: AbortSignal | undefined): Promise<string> {
+  private async openSession(
+    id: string,
+    options: OpenSessionOptions,
+    headed: boolean,
+    usage: SessionUsage,
+    request: AbortSignal | undefined,
+  ): Promise<string> {
     // The catalog renders synchronously, so the optional SDK is loaded once
     // here when installed. Without it the catalog reads the tools' Standard
     // Schemas, and only a model-backed call needs the package.
@@ -219,7 +238,16 @@ export class SessionHost {
     // knows that session's config.
     const configPath = this.options.locateConfig(options.config);
     this.sessions.claimConfig(id, configPath);
-    const loaded = await this.options.loadConfig(configPath);
+    const withhold = this.options.withholdOutput ?? ((load) => load());
+    const loaded = await withhold(async () => {
+      const fresh = await this.options.loadConfig(configPath);
+      // Known to the process before anything can fail with one, so an open
+      // failure and what the config printed while it loaded are redacted
+      // like any other text; a session registers them only once its engine
+      // has launched.
+      registerStaticSecrets(fresh.allSecrets);
+      return fresh;
+    });
     // A session is its own run: a URL declared with port 0 gets a port here.
     const config = await allocateAppPorts(loaded);
     const target = this.resolveTarget(config, options.target);
@@ -242,12 +270,12 @@ export class SessionHost {
         // one attempt that closes as passed, so it traces under `on` only.
         config,
         target: { ...target, video: { mode: 'off', source: 'default' } },
-        headed: this.options.headed,
+        headed,
         env: this.options.env,
         signal: abort.signal,
         timeoutMs: ttlMs + CLOSE_GRACE_MS,
         processes: this.apps,
-        notice: (scope, message) => this.options.log('info', `${scope}: ${message}`),
+        notice: (scope, message) => this.log('info', `${scope}: ${message}`),
       });
       // The coding agent is the brain: the step is driven from here, and the
       // configured model stays out of the way.
@@ -275,13 +303,14 @@ export class SessionHost {
           actionTimeout: config.actionTimeout,
           assertionTimeout: config.assertionTimeout,
         }),
-        warn: (message) => this.options.log('warning', message),
+        warn: (message) => this.log('warning', message),
         onActionFailed: (cause) => usage.failed(classifyError(cause).code),
       });
       const live: LiveSession = {
         id,
         target,
         configPath: loaded.configPath,
+        headed,
         attempt,
         step,
         screen,
@@ -313,8 +342,8 @@ export class SessionHost {
   /** Closes a live session that ended without a close_session: its step concluded, or it sat idle. */
   private endOnItsOwn(live: LiveSession, why: string, endedBy: SessionEndedBy): void {
     if (!this.sessions.isLive(live.id)) return;
-    this.options.log('warning', `session ${live.id} ended: ${why}`);
-    this.close(why, live.id, endedBy).catch((cause: unknown) => this.options.log('error', `closing session ${live.id} failed: ${errorMessage(cause)}`));
+    this.log('warning', `session ${live.id} ended: ${why}`);
+    this.close(why, live.id, endedBy).catch((cause: unknown) => this.log('error', `closing session ${live.id} failed: ${errorMessage(cause)}`));
   }
 
   /** A recorder writing to `<output>/videos/<session>/`, when the engine records video. */
@@ -371,7 +400,7 @@ export class SessionHost {
   private openingText(live: LiveSession, config: ResolvedConfig, screen: string): string {
     const engine = live.target.engine;
     const lines = [
-      `Session ${live.id} open on target "${live.target.name}" (platform ${live.target.platform}, engine ${engine === undefined ? 'none' : `${engine.name} ${engine.version}`}), ${this.options.headed ? 'headed' : 'headless'}; config ${live.configPath}.`,
+      `Session ${live.id} open on target "${live.target.name}" (platform ${live.target.platform}, engine ${engine === undefined ? 'none' : `${engine.name} ${engine.version}`}), ${live.headed ? 'headed' : 'headless'}; config ${live.configPath}.`,
     ];
     if (live.target.app.base !== undefined) {
       lines.push(`App: ${live.target.app.base.href}.`);
@@ -458,6 +487,10 @@ export class SessionHost {
       inputSchema: z.object({
         target: z.string().min(1).optional().describe('Target name from the config; required when the config declares several'),
         config: z.string().min(1).optional().describe("Path to an e2e config file, relative to the server's directory; default: the nearest e2e.config.ts"),
+        headed: z
+          .boolean()
+          .optional()
+          .describe('Show the browser or simulator, when the engine supports it; pass true when the user wants to watch. Default: headless, unless the server was started with --headed'),
       }).strict(),
       readOnly: false,
       call: async (args, extra) => textResult(await this.open(args, extra.signal)),
@@ -504,4 +537,25 @@ export class SessionHost {
       call: async (args) => textResult(await this.close('closed by the agent', args.session)),
     });
   }
+}
+
+/**
+ * The tool with what it returns redacted with every secret value the process
+ * knows: the static values of each config a session loaded, and every value
+ * a session resolved or derived. A failure becomes a result the agent can
+ * react to, never a protocol error, and is redacted the same way.
+ */
+function redacting(spec: McpToolSpec): McpToolSpec {
+  return {
+    ...spec,
+    call: async (args, extra) => {
+      let result: McpToolResult;
+      try {
+        result = await spec.call(args, extra);
+      } catch (cause) {
+        result = errorResult(cause);
+      }
+      return redactResult(result, (text) => processSecrets.redact(text));
+    },
+  };
 }

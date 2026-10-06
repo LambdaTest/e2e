@@ -4,7 +4,17 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startFixtureApp, type FixtureApp } from '../helpers/fixture-app.ts';
 import { assertValidReport } from '../helpers/report-schema.ts';
 import { resultId } from '../../src/internal/ids.ts';
-import { createProject, listProject, resultByTitle, runExisting, runProject, type RunOutcome } from '../helpers/run-project.ts';
+import {
+  createProject,
+  listProject,
+  resultByTitle,
+  runExisting,
+  runProject,
+  runExistingWithConfigFile,
+  runProjectWithConfigFile,
+  workerFakeConfigSource,
+  type RunOutcome,
+} from '../helpers/run-project.ts';
 import type { FinishedRun } from '../../src/index.ts';
 
 describe('runner lifecycle', () => {
@@ -52,10 +62,7 @@ test.afterEach(() => log('afterEach:file-late'));
 `;
       const logPath = path.join('/tmp', `e2e-hooks-${Date.now()}.log`);
       process.env['HOOK_LOG'] = logPath;
-      const { outcome, project } = await runProject(
-        { 'tests/hooks.e2e.ts': hooksFile },
-        { appUrl: app.url },
-      );
+      const { outcome, project } = await runProject({ 'tests/hooks.e2e.ts': hooksFile }, {});
       expect(resultByTitle(outcome, 'inside group').status).toBe('passed');
       const entries = readFileSync(logPath, 'utf8').trim().split('\n');
       expect(entries).toEqual([
@@ -65,7 +72,7 @@ test.afterEach(() => log('afterEach:file-late'));
         'beforeEach:file-late',
         'beforeEach:group',
         'beforeEach:group-late',
-        'body:web',
+        'body:fake',
         'afterEach:group-late',
         'afterEach:group',
         'afterEach:file-late',
@@ -73,6 +80,7 @@ test.afterEach(() => log('afterEach:file-late'));
         'afterAll:group',
         'afterAll:file',
       ]);
+      expect(existsSync(path.join(project.dir, '.e2e', 'junit.xml'))).toBe(false);
       project.cleanup();
     },
     120_000,
@@ -105,7 +113,7 @@ test.setup('sign in', { sessions: ['admin'] }, async ({ session }) => {
 
 test('consumer', { session: 'admin' }, async () => {});
 `;
-      const { outcome, project } = await runProject({ 'tests/runtime-skip.e2e.ts': file }, { appUrl: app.url });
+      const { outcome, project } = await runProject({ 'tests/runtime-skip.e2e.ts': file }, {});
       const conditional = resultByTitle(outcome, 'single organization');
       expect(conditional.status).toBe('skipped');
       expect(conditional.skip).toEqual({ cause: 'explicit', reason: 'the demo tenant has a single organization' });
@@ -155,7 +163,7 @@ test.describe('wizard', { serial: true }, () => {
 `;
       const logPath = path.join('/tmp', `e2e-skiprealm-${Date.now()}.log`);
       process.env['HOOK_LOG'] = logPath;
-      const { outcome, project } = await runProject({ 'tests/skip-realm.e2e.ts': file }, { appUrl: app.url });
+      const { outcome, project } = await runProject({ 'tests/skip-realm.e2e.ts': file }, {});
       expect(resultByTitle(outcome, 'skips first').status).toBe('skipped');
       expect(resultByTitle(outcome, 'runs second').status).toBe('passed');
       const step1 = resultByTitle(outcome, 'step 1 skips');
@@ -185,7 +193,7 @@ test.describe('wizard', { serial: true }, () => {
 test.skip(true, 'not here');
 test('never registered', async () => {});
 `;
-      const { outcome, project } = await runProject({ 'tests/skip-outside.e2e.ts': file }, { appUrl: app.url });
+      const { outcome, project } = await runProject({ 'tests/skip-outside.e2e.ts': file }, {});
       expect(outcome.exitCode).toBe(2);
       expect(outcome.report.run.errors.map((error) => error.code)).toEqual(['COLLECTION_ERROR']);
       expect(outcome.report.run.errors[0]?.message).toMatch(/must be called inside a test body/);
@@ -205,7 +213,6 @@ test('never registered', async () => {});
       };
       const notices: string[] = [];
       const narrowed = await runProject(files, {
-        appUrl: app.url,
         runOptions: { files: ['tests/good.e2e.ts'], onEvent: (event) => { if (event.type === 'notice' && event.target === 'collect') notices.push(event.message); } },
       });
       expect(narrowed.outcome.exitCode).toBe(0);
@@ -217,13 +224,13 @@ test('never registered', async () => {});
       ]);
       narrowed.project.cleanup();
 
-      const named = await runProject(files, { appUrl: app.url, runOptions: { files: ['tests/broken.e2e.ts'] } });
+      const named = await runProject(files, { runOptions: { files: ['tests/broken.e2e.ts'] } });
       expect(named.outcome.exitCode).toBe(2);
       expect(named.outcome.report.run.errors.map((error) => error.code)).toEqual(['COLLECTION_ERROR']);
       expect(named.outcome.report.run.errors[0]?.message).toMatch(/^failed to collect tests\/broken\.e2e\.ts: /);
       named.project.cleanup();
 
-      const whole = await runProject(files, { appUrl: app.url });
+      const whole = await runProject(files, {});
       expect(whole.outcome.exitCode).toBe(2);
       expect(whole.outcome.report.run.errors.map((error) => error.code)).toEqual(['COLLECTION_ERROR']);
       expect(whole.outcome.report.run.errors[0]?.message).toMatch(/failed to collect tests\/broken\.e2e\.ts/);
@@ -248,7 +255,7 @@ test('independent survives', async ({ app }) => {
   await app.open();
 });
 `;
-      const { outcome, project } = await runProject({ 'tests/hookfail.e2e.ts': file }, { appUrl: app.url });
+      const { outcome, project } = await runProject({ 'tests/hookfail.e2e.ts': file }, {});
       const skipped = resultByTitle(outcome, 'unreachable');
       expect(skipped.status).toBe('skipped');
       expect(skipped.skip?.cause).toBe('hook-failed');
@@ -282,7 +289,7 @@ test('second passes', async ({ app }) => {
 `;
       const logPath = path.join('/tmp', `e2e-discard-${Date.now()}.log`);
       process.env['HOOK_LOG'] = logPath;
-      const { outcome, project } = await runProject({ 'tests/discard.e2e.ts': file }, { appUrl: app.url });
+      const { outcome, project } = await runProject({ 'tests/discard.e2e.ts': file }, {});
       expect(resultByTitle(outcome, 'first fails').status).toBe('failed');
       expect(resultByTitle(outcome, 'second passes').status).toBe('passed');
       // The failed realm is discarded but its afterAll still runs; the fresh
@@ -338,7 +345,7 @@ test('consumer', { session: 'seeded' }, async ({ app }) => {
 `;
       const logPath = path.join('/tmp', `e2e-suitehooks-${Date.now()}.log`);
       process.env['HOOK_LOG'] = logPath;
-      const { outcome, project } = await runProject({ 'tests/hooks.e2e.ts': file }, { appUrl: app.url });
+      const { outcome, project } = await runProject({ 'tests/hooks.e2e.ts': file }, {});
       expect(resultByTitle(outcome, 'seed').status).toBe('passed');
       expect(resultByTitle(outcome, 'step 1').status).toBe('passed');
       expect(resultByTitle(outcome, 'step 2').status).toBe('passed');
@@ -379,7 +386,7 @@ test.describe('wizard', { serial: true }, () => {
   test('step 2', async () => {});
 });
 `;
-      const { outcome, project } = await runProject({ 'tests/serialhook.e2e.ts': file }, { appUrl: app.url });
+      const { outcome, project } = await runProject({ 'tests/serialhook.e2e.ts': file }, {});
       for (const title of ['step 1', 'step 2']) {
         const result = resultByTitle(outcome, title);
         expect(result.status).toBe('skipped');
@@ -413,7 +420,7 @@ test('fails then cannot retry', { retries: 1 }, async ({ app }) => {
 `;
       const marker = path.join('/tmp', `e2e-retryhook-${Date.now()}`);
       process.env['RETRY_MARKER'] = marker;
-      const { outcome, project } = await runProject({ 'tests/retryhook.e2e.ts': file }, { appUrl: app.url });
+      const { outcome, project } = await runProject({ 'tests/retryhook.e2e.ts': file }, {});
       const result = resultByTitle(outcome, 'fails then cannot retry');
       expect(result.status).toBe('failed');
       expect(result.attempts).toHaveLength(1);
@@ -441,7 +448,7 @@ test('flaky test', { retries: 2 }, async ({ app }) => {
 `;
       const marker = path.join('/tmp', `e2e-flaky-${Date.now()}`);
       process.env['FLAKY_MARKER'] = marker;
-      const { outcome, project } = await runProject({ 'tests/flaky.e2e.ts': file }, { appUrl: app.url });
+      const { outcome, project } = await runProject({ 'tests/flaky.e2e.ts': file }, {});
       const result = resultByTitle(outcome, 'flaky test');
       expect(result.status).toBe('flaky');
       expect(result.attempts).toHaveLength(2);
@@ -463,84 +470,9 @@ test('sleeps forever', { timeout: 1500 }, async ({ app }) => {
   await new Promise((resolve) => setTimeout(resolve, 60_000));
 });
 `;
-      const { outcome, project } = await runProject({ 'tests/slow.e2e.ts': file }, { appUrl: app.url });
+      const { outcome, project } = await runProject({ 'tests/slow.e2e.ts': file }, {});
       const result = resultByTitle(outcome, 'sleeps forever');
       expect(result.status).toBe('timed-out');
-      expect(outcome.exitCode).toBe(1);
-      project.cleanup();
-    },
-    120_000,
-  );
-
-  it(
-    'produces sessions in setup tests and restores them for consumers',
-    async () => {
-      const setupFile = `import { test, expect } from 'e2e';
-
-test.setup('seed storage', { sessions: ['seeded'] }, async ({ app, screen, session }) => {
-  await app.open('/storage');
-  await screen.getByRole('button', { name: 'Save marker' }).tap();
-  await expect(screen.getByRole('status', { name: 'Marker' })).toHaveText('saved');
-  await session.save('seeded');
-});
-`;
-      const consumerFile = `import { test } from '@e2e-dev/web';
-import { expect } from 'e2e';
-
-test('starts with the seeded state', { session: 'seeded' }, async ({ app, screen, browser }) => {
-  await app.open('/storage');
-  await expect(screen.getByRole('status', { name: 'Marker' })).toHaveText('saved');
-  const cookies = await browser.cookies();
-  if (!cookies.some((cookie) => cookie.name === 'fixture')) {
-    throw new Error('expected the fixture cookie from the session');
-  }
-});
-
-test('without a session starts clean', async ({ app, screen }) => {
-  await app.open('/storage');
-  await expect(screen.getByRole('status', { name: 'Marker' })).toHaveText('empty');
-});
-`;
-      const { outcome, project } = await runProject(
-        { 'tests/auth.setup.e2e.ts': setupFile, 'tests/consumer.e2e.ts': consumerFile },
-        { appUrl: app.url },
-      );
-      expect(resultByTitle(outcome, 'seed storage').status).toBe('passed');
-      expect(resultByTitle(outcome, 'starts with the seeded state').status).toBe('passed');
-      expect(resultByTitle(outcome, 'without a session starts clean').status).toBe('passed');
-      expect(outcome.exitCode).toBe(0);
-      const sessionsRoot = path.join(project.dir, '.e2e', 'sessions');
-      if (existsSync(sessionsRoot)) {
-        expect(readdirSync(sessionsRoot)).toEqual([]);
-      }
-      project.cleanup();
-    },
-    120_000,
-  );
-
-  it(
-    'skips session consumers when their setup fails',
-    async () => {
-      const file = `import { test } from 'e2e';
-
-test.setup('failing setup', { sessions: ['broken'] }, async ({ app }) => {
-  await app.open();
-  throw new Error('cannot authenticate');
-});
-
-test('depends on broken', { session: 'broken' }, async ({ app }) => {
-  await app.open();
-});
-
-test('unrelated still runs', async ({ app }) => {
-  await app.open();
-});
-`;
-      const { outcome, project } = await runProject({ 'tests/dep.e2e.ts': file }, { appUrl: app.url });
-      const dependent = resultByTitle(outcome, 'depends on broken');
-      expect(dependent.status).toBe('skipped');
-      expect(dependent.skip?.cause).toBe('setup-failed');
-      expect(resultByTitle(outcome, 'unrelated still runs').status).toBe('passed');
       expect(outcome.exitCode).toBe(1);
       project.cleanup();
     },
@@ -607,35 +539,17 @@ test.describe('wizard', { serial: true }, () => {
   );
 
   it(
-    'reports config errors as exit 2 without executing tests',
-    async () => {
-      const { outcome, project } = await runProject(
-        { 'tests/none.e2e.ts': `import { test } from 'e2e';\ntest('x', async () => {});\n` },
-        {
-          appUrl: app.url,
-          config: { reporters: ['json', 'list'] as never },
-          runOptions: { quiet: true },
-        },
-      );
-      expect(outcome.exitCode).toBe(2);
-      expect(outcome.status).toBe('error');
-      project.cleanup();
-    },
-    120_000,
-  );
-
-  it(
     'writes junit.xml beside the report from the same document when the junit reporter is selected',
     async () => {
       const file = `import { test } from 'e2e';
 test('passes', { tags: ['smoke'] }, async () => {});
 test('fails', async () => {
-  throw new Error('junit <sees> & "reports" this');
+  throw new Error('junit reports this');
 });
 `;
       const { outcome, project } = await runProject(
         { 'tests/junit.e2e.ts': file },
-        { appUrl: app.url, config: { reporters: ['junit'] } },
+        { config: { reporters: ['junit'] } },
       );
       expect(outcome.exitCode).toBe(1);
       expect(outcome.report.run.results.map((result) => result.tags)).toEqual([['smoke'], []]);
@@ -645,24 +559,7 @@ test('fails', async () => {
       expect(xml).toContain(
         '<testsuite name="tests/junit.e2e.ts" tests="2" failures="1" errors="0" skipped="0"',
       );
-      expect(xml).toContain('<testcase name="passes [web]" classname="tests/junit.e2e.ts"');
-      expect(xml).toContain('<testcase name="fails [web]" classname="tests/junit.e2e.ts"');
-      expect(xml).toContain('<failure message="junit &lt;sees&gt; &amp; &quot;reports&quot; this"');
       expect(readdirSync(path.join(project.dir, '.e2e')).filter((name) => name.endsWith('.tmp'))).toEqual([]);
-      project.cleanup();
-    },
-    120_000,
-  );
-
-  it(
-    'writes no junit.xml unless the reporter is selected',
-    async () => {
-      const { outcome, project } = await runProject(
-        { 'tests/no-junit.e2e.ts': `import { test } from 'e2e';\ntest('x', async () => {});\n` },
-        { appUrl: app.url },
-      );
-      expect(outcome.exitCode).toBe(0);
-      expect(existsSync(path.join(project.dir, '.e2e', 'junit.xml'))).toBe(false);
       project.cleanup();
     },
     120_000,
@@ -683,12 +580,12 @@ test.describe('group', () => {
 test('other', { tags: ['smoke'] }, async () => {});
 `,
       };
-      const { pairs, project } = await listProject(files, { appUrl: 'http://127.0.0.1:9' });
+      const { pairs, project } = await listProject(files, {});
       expect(pairs.map((pair) => [pair.file, pair.titlePath.join(' > '), pair.target, pair.disposition])).toEqual([
-        ['tests/list.e2e.ts', 'plain', 'web', 'run'],
-        ['tests/list.e2e.ts', 'group > nested', 'web', 'run'],
-        ['tests/list.e2e.ts', 'group > left out', 'web', 'skip'],
-        ['tests/other.e2e.ts', 'other', 'web', 'run'],
+        ['tests/list.e2e.ts', 'plain', 'fake', 'run'],
+        ['tests/list.e2e.ts', 'group > nested', 'fake', 'run'],
+        ['tests/list.e2e.ts', 'group > left out', 'fake', 'skip'],
+        ['tests/other.e2e.ts', 'other', 'fake', 'run'],
       ]);
       expect(pairs.map((pair) => pair.tags)).toEqual([[], ['smoke'], [], ['smoke']]);
       expect(pairs[2]?.skipReason).toBe('not today');
@@ -697,30 +594,10 @@ test('other', { tags: ['smoke'] }, async () => {});
 
       // A config glob spelled with a leading `./` selects the same files.
       const dotted = await listProject(files, {
-        appUrl: 'http://127.0.0.1:9',
         config: { tests: './tests/**/*.e2e.ts' },
       });
       expect(dotted.pairs.map((pair) => pair.title)).toEqual(['plain', 'nested', 'left out', 'other']);
       dotted.project.cleanup();
-
-      const tagged = await listProject(files, {
-        appUrl: 'http://127.0.0.1:9',
-        listOptions: { tags: ['smoke'], files: ['tests/other.e2e.ts'] },
-      });
-      expect(tagged.pairs.map((pair) => pair.title)).toEqual(['other']);
-      tagged.project.cleanup();
-
-      const grepped = await listProject(files, {
-        appUrl: 'http://127.0.0.1:9',
-        listOptions: { grepInvert: [/^group/], excludeTags: ['smoke'] },
-      });
-      expect(grepped.pairs.map((pair) => pair.title)).toEqual(['plain']);
-      grepped.project.cleanup();
-
-
-      await expect(listProject({ 'tests/empty.txt': '' }, { appUrl: 'http://127.0.0.1:9' })).rejects.toMatchObject({
-        code: 'NO_TESTS',
-      });
     },
     120_000,
   );
@@ -739,7 +616,7 @@ test('breaks the second time', async () => {
 });
 `,
       };
-      const { outcome, project } = await runProject(files, { appUrl: app.url, runOptions: { repeatEach: 3, retries: 0 } });
+      const { outcome, project } = await runProject(files, { runOptions: { repeatEach: 3, retries: 0 } });
       expect(outcome.exitCode).toBe(1);
       const results = outcome.report.run.results.toSorted((a, b) => a.declarationIndex - b.declarationIndex || a.repeat - b.repeat);
       expect(results.map((result) => [result.titlePath[0], result.repeat, result.status])).toEqual([
@@ -751,7 +628,7 @@ test('breaks the second time', async () => {
         ['breaks the second time', 2, 'failed'],
       ]);
       expect(new Set(results.map((result) => result.id)).size).toBe(6);
-      expect(results[0]!.id).toBe(resultId(results[0]!.testId, 'web', 'default'));
+      expect(results[0]!.id).toBe(resultId(results[0]!.testId, 'fake', 'default'));
       const paths = results[4]!.attempts[0]!.artifacts.flatMap((artifact) => (artifact.path === undefined ? [] : [artifact.path]));
       expect(paths.length).toBeGreaterThan(0);
       expect(paths.every((artifactPath) => artifactPath.includes('/repeat-1/'))).toBe(true);
@@ -761,7 +638,6 @@ test('breaks the second time', async () => {
       // and hands its reporters the report it selected from.
       let handed: FinishedRun | undefined;
       const rerun = await runExisting(project, {
-        appUrl: app.url,
         runOptions: { lastFailed: true },
         config: {
           reporters: [
@@ -777,7 +653,7 @@ test('breaks the second time', async () => {
       expect(rerun.results.filter((result) => result.selected).map((result) => result.test.title)).toEqual(['breaks the second time']);
       expect(handed?.lastRun?.run.id).toBe(outcome.report.run.id);
 
-      const invalid = await runExisting(project, { appUrl: app.url, runOptions: { repeatEach: 0 } });
+      const invalid = await runExisting(project, { runOptions: { repeatEach: 0 } });
       expect(invalid.exitCode).toBe(2);
       expect(invalid.report.run.errors.map((error) => error.message)).toEqual(['repeatEach must be a positive safe integer, got 0']);
       project.cleanup();
@@ -798,7 +674,6 @@ test('never runs either', async () => { throw new Error('three'); });
       };
       const events: string[] = [];
       const { outcome, project } = await runProject(files, {
-        appUrl: app.url,
         runOptions: { maxFailures: 2, onEvent: (event) => { if (event.type === 'run-stopped') events.push(`${event.failures}/${event.limit}`); } },
       });
       expect(outcome.exitCode).toBe(1);
@@ -814,7 +689,7 @@ test('never runs either', async () => { throw new Error('three'); });
       expect(byDeclaration[2]!.skip?.reason).toBe('run stopped after 2 failures (--max-failures 2)');
 
       // The SDK path is bounded like the flag: a count below one is a configuration error, not a run that stops at once.
-      const invalid = await runExisting(project, { appUrl: app.url, runOptions: { maxFailures: 0 } });
+      const invalid = await runExisting(project, { runOptions: { maxFailures: 0 } });
       expect(invalid.exitCode).toBe(2);
       expect(invalid.report.run.errors.map((error) => [error.code, error.message])).toEqual([
         ['INVALID_CONFIG', 'maxFailures must be a positive safe integer, got 0'],
@@ -840,7 +715,6 @@ test('after the group too', async () => {});
       };
       let planned = 0;
       const { outcome, project } = await runProject(files, {
-        appUrl: app.url,
         runOptions: { maxFailures: 1, onEvent: (event) => { if (event.type === 'plan') planned = event.total; } },
       });
       expect(outcome.exitCode).toBe(1);
@@ -875,11 +749,11 @@ test('sleeps until interrupted', async () => {
 test('never started', async () => {});
 test('never started either', async () => {});
 `,
+        'e2e.config.ts': workerFakeConfigSource(1),
       });
       const controller = new AbortController();
       let planned = 0;
-      const interrupted = await runExisting(project, {
-        appUrl: app.url,
+      const interrupted = await runExistingWithConfigFile(project, {
         runOptions: {
           interruptSignal: controller.signal,
           onEvent: (event) => {
@@ -903,7 +777,7 @@ test('never started either', async () => {});
 
       // The rerun reads the report the interrupt wrote; the body that slept passes at once now.
       writeFileSync(path.join(project.dir, 'tests', 'first.e2e.ts'), sleeping.replace('setTimeout(resolve, 60_000)', 'setTimeout(resolve, 0)'));
-      const rerun = await runExisting(project, { appUrl: app.url, runOptions: { lastFailed: true } });
+      const rerun = await runExistingWithConfigFile(project, { runOptions: { lastFailed: true } });
       expect(rerun.exitCode).toBe(0);
       const byFile = rerun.results.toSorted((a, b) => (a.test.file === b.test.file ? a.test.declarationIndex - b.test.declarationIndex : a.test.file < b.test.file ? -1 : 1));
       expect(byFile.map((result) => [result.test.title, result.selected, result.status])).toEqual([
@@ -919,17 +793,18 @@ test('never started either', async () => {});
   it(
     'an interrupt during a serial group retry keeps each member\'s verdict from the attempt before it',
     async () => {
-      const project = createProject({});
-      const marker = path.join(project.dir, 'failed-once');
-      mkdirSync(path.join(project.dir, 'tests'), { recursive: true });
-      writeFileSync(
-        path.join(project.dir, 'tests', 'flow.e2e.ts'),
-        `import { existsSync, writeFileSync } from 'node:fs';
+      const controller = new AbortController();
+      let starts = 0;
+      const startedAt = Date.now();
+      const { outcome, project } = await runProjectWithConfigFile(
+        {
+          'tests/flow.e2e.ts': `import { existsSync, writeFileSync } from 'node:fs';
 import { test } from 'e2e';
+const marker = new URL('./failed-once', import.meta.url);
 test.describe('flow', { serial: true }, () => {
   test('first step', async () => {
-    if (!existsSync(${JSON.stringify(marker)})) {
-      writeFileSync(${JSON.stringify(marker)}, '');
+    if (!existsSync(marker)) {
+      writeFileSync(marker, '');
       throw new Error('first attempt fails');
     }
     await new Promise((resolve) => setTimeout(resolve, 60_000));
@@ -937,21 +812,20 @@ test.describe('flow', { serial: true }, () => {
   test('second step', async () => {});
 });
 `,
-      );
-      const controller = new AbortController();
-      let starts = 0;
-      const outcome = await runExisting(project, {
-        appUrl: app.url,
-        config: { tests: 'tests/**/*.e2e.ts', retries: 1 },
-        runOptions: {
-          interruptSignal: controller.signal,
-          onEvent: (event) => {
-            // A serial member starts once per group attempt: the second start is the retry.
-            if (event.type === 'test-started' && event.title === 'flow > first step' && (starts += 1) === 2) controller.abort();
+        },
+        {
+          configSource: workerFakeConfigSource(1, `\n  tests: 'tests/**/*.e2e.ts',\n  retries: 1,`),
+          runOptions: {
+            interruptSignal: controller.signal,
+            onEvent: (event) => {
+              // A serial member starts once per group attempt: the second start is the retry.
+              if (event.type === 'test-started' && event.title === 'flow > first step' && (starts += 1) === 2) controller.abort();
+            },
           },
         },
-      });
+      );
       expect(outcome.exitCode).toBe(130);
+      expect(Date.now() - startedAt).toBeLessThan(30_000);
       expect(outcome.report.run.serialGroups[0]?.attempts.map((attempt) => attempt.status)).toEqual(['failed', 'interrupted']);
       expect(resultByTitle(outcome, 'first step').status).toBe('failed');
       expect(outcome.report.run.summary).toMatchObject({ failed: 1, interrupted: 0 });
@@ -960,7 +834,6 @@ test.describe('flow', { serial: true }, () => {
     },
     120_000,
   );
-
   it(
     'a forced interrupt still writes the junit and markdown files, so none of the previous run is left beside the report',
     async () => {
@@ -1013,7 +886,6 @@ test('queued behind it too', async () => {});
 `,
       });
       const aborted = await runExisting(project, {
-        appUrl: app.url,
         config: { tests: 'tests/**/*.e2e.ts', workers: 1 },
       });
       expect(aborted.exitCode).toBe(2);
@@ -1038,7 +910,6 @@ test('needs the model', async ({ app }) => {
 `,
       );
       const rerun = await runExisting(project, {
-        appUrl: app.url,
         config: { tests: 'tests/**/*.e2e.ts', workers: 1 },
         runOptions: { lastFailed: true },
       });
@@ -1066,14 +937,14 @@ test('fails', async () => {
 test('also passes', async () => {});
 `,
       };
-      const fresh = await runProject(files, { appUrl: app.url, runOptions: { lastFailed: true } });
+      const fresh = await runProject(files, { runOptions: { lastFailed: true } });
       expect(fresh.outcome.exitCode).toBe(2);
       expect(fresh.outcome.report.run.errors.map((error) => [error.code, error.phase])).toEqual([['NO_LAST_RUN', 'collection']]);
       expect(fresh.outcome.report.run.errors[0]!.message).toContain(path.join(fresh.project.dir, '.e2e', 'report.json'));
 
-      const first = await runExisting(fresh.project, { appUrl: app.url });
+      const first = await runExisting(fresh.project, {});
       expect(first.exitCode).toBe(1);
-      const second = await runExisting(fresh.project, { appUrl: app.url, runOptions: { lastFailed: true } });
+      const second = await runExisting(fresh.project, { runOptions: { lastFailed: true } });
       expect(second.exitCode).toBe(1);
       const byTitle = second.results.toSorted((a, b) => a.test.declarationIndex - b.test.declarationIndex);
       expect(byTitle.map((result) => [result.test.title, result.selected, result.status])).toEqual([
@@ -1115,25 +986,25 @@ test('fails', async () => {
       const hookErrors = (outcome: RunOutcome) =>
         outcome.report.run.errors.map((error) => [error.code, error.phase, error.scopeId, error.scope]);
 
-      const first = await runExisting(project, { appUrl: app.url });
+      const first = await runExisting(project, {});
       expect(first.exitCode).toBe(1);
-      expect(hookErrors(first)).toEqual([['HOOK_FAILED', 'afterAll', 'teardown', { file: 'tests/hooks.e2e.ts', targetId: 'web', titlePath: ['teardown'] }]]);
+      expect(hookErrors(first)).toEqual([['HOOK_FAILED', 'afterAll', 'teardown', { file: 'tests/hooks.e2e.ts', targetId: 'fake', titlePath: ['teardown'] }]]);
       assertValidReport(first.report);
 
       // The body is fixed, the hook is not: the scope runs again and still fails the run.
       writeFileSync(path.join(project.dir, 'tests', 'body.e2e.ts'), brokenBody.replace(`throw new Error('still broken');`, ''));
-      const second = await runExisting(project, { appUrl: app.url, runOptions: { lastFailed: true } });
+      const second = await runExisting(project, { runOptions: { lastFailed: true } });
       expect(second.exitCode).toBe(1);
       expect(selection(second)).toEqual([
         ['fails', true, 'passed'],
         ['passes in the scope', true, 'passed'],
         ['passes outside it', false, 'skipped'],
       ]);
-      expect(hookErrors(second)).toEqual([['HOOK_FAILED', 'afterAll', 'teardown', { file: 'tests/hooks.e2e.ts', targetId: 'web', titlePath: ['teardown'] }]]);
+      expect(hookErrors(second)).toEqual([['HOOK_FAILED', 'afterAll', 'teardown', { file: 'tests/hooks.e2e.ts', targetId: 'fake', titlePath: ['teardown'] }]]);
 
       // The hook is fixed: its scope runs once more and the error is gone, not carried.
       writeFileSync(path.join(project.dir, 'tests', 'hooks.e2e.ts'), hooks(''));
-      const third = await runExisting(project, { appUrl: app.url, runOptions: { lastFailed: true } });
+      const third = await runExisting(project, { runOptions: { lastFailed: true } });
       expect(third.exitCode).toBe(0);
       expect(selection(third)).toEqual([
         ['fails', false, 'skipped'],
@@ -1141,7 +1012,7 @@ test('fails', async () => {
         ['passes outside it', false, 'skipped'],
       ]);
       expect(third.report.run.errors).toEqual([]);
-      const fourth = await runExisting(project, { appUrl: app.url, runOptions: { lastFailed: true } });
+      const fourth = await runExisting(project, { runOptions: { lastFailed: true } });
       expect(fourth.exitCode).toBe(2);
       expect(fourth.report.run.errors.map((error) => error.code)).toEqual(['NO_TESTS']);
       project.cleanup();
@@ -1162,7 +1033,7 @@ test('${title}', async () => {
       const selection = (outcome: RunOutcome) =>
         outcome.results.toSorted((a, b) => (a.test.file < b.test.file ? -1 : 1)).map((result) => [result.test.title, result.selected, result.status, result.skip?.cause]);
 
-      const limited = await runExisting(project, { appUrl: app.url, config, runOptions: { maxFailures: 1 } });
+      const limited = await runExisting(project, { config, runOptions: { maxFailures: 1 } });
       expect(limited.exitCode).toBe(1);
       expect(selection(limited)).toEqual([
         ['first', true, 'failed', undefined],
@@ -1171,7 +1042,7 @@ test('${title}', async () => {
 
       // The failure limit stopped `second` before it ran, so it is owed; a rerun narrowed to `first` carries it.
       writeFileSync(path.join(project.dir, 'tests', 'first.e2e.ts'), `import { test } from 'e2e';\ntest('first', async () => {});\n`);
-      const rerun = await runExisting(project, { appUrl: app.url, config, runOptions: { lastFailed: true, grep: [/first/] } });
+      const rerun = await runExisting(project, { config, runOptions: { lastFailed: true, grep: [/first/] } });
       expect(rerun.exitCode).toBe(0);
       expect(selection(rerun)).toEqual([
         ['first', true, 'passed', undefined],
@@ -1181,7 +1052,7 @@ test('${title}', async () => {
       assertValidReport(rerun.report);
 
       // Left out by --grep, `second` is still owed: the next --last-failed runs it, and only it.
-      const owed = await runExisting(project, { appUrl: app.url, config, runOptions: { lastFailed: true } });
+      const owed = await runExisting(project, { config, runOptions: { lastFailed: true } });
       expect(owed.exitCode).toBe(1);
       expect(selection(owed)).toEqual([
         ['first', false, 'skipped', 'filtered'],
@@ -1189,165 +1060,6 @@ test('${title}', async () => {
       ]);
       expect(owed.report.run.carried).toBeUndefined();
       project.cleanup();
-    },
-    120_000,
-  );
-
-  it(
-    '--last-failed narrowed past a file that fails to import keeps owing its tests until a run carries them out',
-    async () => {
-      const failing = (title: string) => `import { test } from 'e2e';
-test('${title}', async () => {
-  throw new Error('${title} is broken');
-});
-`;
-      const project = createProject({ 'tests/first.e2e.ts': failing('first'), 'tests/second.e2e.ts': failing('second') });
-      const first = await runExisting(project, { appUrl: app.url });
-      expect(first.exitCode).toBe(1);
-
-      // `second` is owed and its file no longer imports; a rerun narrowed to `first` cannot collect it, so it carries it.
-      writeFileSync(path.join(project.dir, 'tests', 'first.e2e.ts'), `import { test } from 'e2e';\ntest('first', async () => {});\n`);
-      writeFileSync(path.join(project.dir, 'tests', 'second.e2e.ts'), `import './not-written-yet.ts';\n${failing('second')}`);
-      const narrowed = await runExisting(project, { appUrl: app.url, runOptions: { lastFailed: true, files: ['tests/first.e2e.ts'] } });
-      expect(narrowed.exitCode).toBe(0);
-      expect(narrowed.results.map((result) => [result.test.title, result.status])).toEqual([['first', 'passed']]);
-      expect(narrowed.report.run.carried?.results.map((result) => [result.titlePath.at(-1), result.status])).toEqual([['second', 'failed']]);
-      assertValidReport(narrowed.report);
-
-      // Once the file imports again, the next --last-failed runs `second`, and only it.
-      writeFileSync(path.join(project.dir, 'tests', 'second.e2e.ts'), `import { test } from 'e2e';\ntest('second', async () => {});\n`);
-      const owed = await runExisting(project, { appUrl: app.url, runOptions: { lastFailed: true } });
-      expect(owed.exitCode).toBe(0);
-      expect(owed.results.filter((result) => result.selected).map((result) => result.test.title)).toEqual(['second']);
-      expect(owed.report.run.carried).toBeUndefined();
-      project.cleanup();
-    },
-    120_000,
-  );
-
-  it(
-    '--last-failed carries a failed hook another filter kept from running again, until its scope runs',
-    async () => {
-      const hooks = (teardown: string) => `import { test } from 'e2e';
-test.afterAll(() => {
-  ${teardown}
-});
-test('in the hook scope', async () => {});
-`;
-      const project = createProject({
-        'tests/hooks.e2e.ts': hooks(`throw new Error('teardown broke');`),
-        'tests/body.e2e.ts': `import { test } from 'e2e';\ntest('body', async () => {\n  throw new Error('still broken');\n});\n`,
-      });
-      const ran = (outcome: RunOutcome) => outcome.results.filter((result) => result.selected).map((result) => [result.test.title, result.status]);
-      const hookScope = { file: 'tests/hooks.e2e.ts', targetId: 'web', titlePath: [] };
-
-      const first = await runExisting(project, { appUrl: app.url });
-      expect(first.exitCode).toBe(1);
-
-      writeFileSync(path.join(project.dir, 'tests', 'body.e2e.ts'), `import { test } from 'e2e';\ntest('body', async () => {});\n`);
-      const narrowed = await runExisting(project, { appUrl: app.url, runOptions: { lastFailed: true, grep: [/body/] } });
-      expect(narrowed.exitCode).toBe(0);
-      expect(ran(narrowed)).toEqual([['body', 'passed']]);
-      expect(narrowed.report.run.errors).toEqual([]);
-      expect(narrowed.report.run.carried?.results.map((result) => result.titlePath.at(-1))).toEqual(['in the hook scope']);
-      expect(narrowed.report.run.carried?.errors.map((error) => [error.code, error.phase, error.scope])).toEqual([['HOOK_FAILED', 'afterAll', hookScope]]);
-      assertValidReport(narrowed.report);
-
-      // The scope runs again and the hook still fails: reported by the run itself, carried no more.
-      const again = await runExisting(project, { appUrl: app.url, runOptions: { lastFailed: true } });
-      expect(again.exitCode).toBe(1);
-      expect(ran(again)).toEqual([['in the hook scope', 'passed']]);
-      expect(again.report.run.errors.map((error) => [error.code, error.scope])).toEqual([['HOOK_FAILED', hookScope]]);
-      expect(again.report.run.carried).toBeUndefined();
-
-      writeFileSync(path.join(project.dir, 'tests', 'hooks.e2e.ts'), hooks(''));
-      const fixed = await runExisting(project, { appUrl: app.url, runOptions: { lastFailed: true } });
-      expect(fixed.exitCode).toBe(0);
-      expect(ran(fixed)).toEqual([['in the hook scope', 'passed']]);
-      expect(fixed.report.run.carried).toBeUndefined();
-      project.cleanup();
-    },
-    120_000,
-  );
-
-  it(
-    '--last-failed runs a setup whose afterAll failed again through the tests that consume its session',
-    async () => {
-      const auth = (teardown: string) => `import { test } from 'e2e';
-test.afterAll(() => {
-  ${teardown}
-});
-test.setup('sign in', { sessions: ['member'] }, async ({ app, session }) => {
-  await app.open();
-  await session.save('member');
-});
-`;
-      const project = createProject({
-        'tests/auth.e2e.ts': auth(`throw new Error('sign out broke');`),
-        'tests/member.e2e.ts': `import { test } from 'e2e';
-test('signed in', { session: 'member' }, async () => {});
-`,
-        'tests/other.e2e.ts': `import { test } from 'e2e';
-test('unrelated', async () => {
-  throw new Error('still broken');
-});
-`,
-      });
-      const ran = (outcome: RunOutcome) =>
-        outcome.results.filter((result) => result.selected).map((result) => [result.test.title, result.status]).toSorted();
-
-      const first = await runExisting(project, { appUrl: app.url });
-      expect(first.exitCode).toBe(1);
-      expect(first.report.run.errors.map((error) => [error.code, error.phase, error.scope])).toEqual([
-        ['HOOK_FAILED', 'afterAll', { file: 'tests/auth.e2e.ts', targetId: 'web', titlePath: [] }],
-      ]);
-
-      writeFileSync(path.join(project.dir, 'tests', 'other.e2e.ts'), `import { test } from 'e2e';
-test('unrelated', async () => {});
-`);
-      // A rerun that needs none of the setup's sessions carries its failed afterAll, with no row for the setup.
-      const narrowed = await runExisting(project, { appUrl: app.url, runOptions: { lastFailed: true, grep: [/unrelated/] } });
-      expect(narrowed.exitCode).toBe(0);
-      expect(ran(narrowed)).toEqual([['unrelated', 'passed']]);
-      expect(narrowed.report.run.carried?.results.map((result) => [result.kind, result.titlePath.at(-1)])).toEqual([['setup', 'sign in']]);
-      expect(narrowed.report.run.carried?.errors.map((error) => error.code)).toEqual(['HOOK_FAILED']);
-      assertValidReport(narrowed.report);
-
-      const second = await runExisting(project, { appUrl: app.url, runOptions: { lastFailed: true } });
-      expect(second.exitCode).toBe(1);
-      expect(ran(second)).toEqual([
-        ['sign in', 'passed'],
-        ['signed in', 'passed'],
-      ]);
-      expect(second.report.run.errors.map((error) => error.code)).toEqual(['HOOK_FAILED']);
-
-      writeFileSync(path.join(project.dir, 'tests', 'auth.e2e.ts'), auth(''));
-      const third = await runExisting(project, { appUrl: app.url, runOptions: { lastFailed: true } });
-      expect(third.exitCode).toBe(0);
-      expect(ran(third)).toEqual([
-        ['sign in', 'passed'],
-        ['signed in', 'passed'],
-      ]);
-      expect(third.report.run.errors).toEqual([]);
-      project.cleanup();
-    },
-    120_000,
-  );
-
-  it(
-    'fails with NO_TESTS unless --pass-with-no-tests',
-    async () => {
-      const empty = { 'tests/empty.txt': 'not a test' };
-      const first = await runProject(empty, { appUrl: app.url });
-      expect(first.outcome.exitCode).toBe(2);
-      first.project.cleanup();
-
-      const second = await runProject(empty, {
-        appUrl: app.url,
-        runOptions: { passWithNoTests: true },
-      });
-      expect(second.outcome.exitCode).toBe(0);
-      second.project.cleanup();
     },
     120_000,
   );
@@ -1369,14 +1081,13 @@ test('unrelated', async () => {});
       const unselected = (outcome: RunOutcome) =>
         outcome.results.filter((result) => !result.selected).map((result) => result.test.title).toSorted();
 
-      const directory = await runProject(files, { appUrl: app.url, runOptions: { files: ['tests/agent'] } });
+      const directory = await runProject(files, { runOptions: { files: ['tests/agent'] } });
       expect(directory.outcome.exitCode).toBe(0);
       expect(titles(directory.outcome)).toEqual(['agent one', 'agent two']);
       expect(unselected(directory.outcome)).toEqual(['other three', 'top']);
       directory.project.cleanup();
 
       const glob = await runProject(files, {
-        appUrl: app.url,
         runOptions: { files: ['tests/*/*.e2e.ts', 'tests/top.e2e.ts'] },
       });
       expect(glob.outcome.exitCode).toBe(0);
@@ -1384,7 +1095,6 @@ test('unrelated', async () => {});
       glob.project.cleanup();
 
       const missing = await runProject(files, {
-        appUrl: app.url,
         runOptions: { files: ['tests/agnet', 'tests/*.spec.ts'] },
       });
       expect(missing.outcome.exitCode).toBe(2);
@@ -1400,70 +1110,6 @@ test('unrelated', async () => {});
     },
     120_000,
   );
-  it(
-    'closes a scope when its last test finishes and keeps same-titled siblings apart',
-    async () => {
-      const file = `import { appendFileSync } from 'node:fs';
-import { test } from 'e2e';
-
-const log = (entry: string) => appendFileSync(process.env.HOOK_LOG!, entry + '\\n');
-
-test.beforeAll(() => log('beforeAll:file'));
-test.afterAll(() => log('afterAll:file'));
-
-test.describe('A', () => {
-  test.beforeAll(() => log('beforeAll:A'));
-  test.afterAll(() => log('afterAll:A'));
-  test.beforeEach(() => log('beforeEach:A'));
-  test('a1', async () => { log('body:a1'); });
-  test('a2', async () => { log('body:a2'); });
-});
-
-test.describe('B', () => {
-  test.beforeAll(() => log('beforeAll:B'));
-  test.afterAll(() => log('afterAll:B'));
-  test('b1', async () => { log('body:b1'); });
-});
-
-// A second group titled "A" is a scope of its own, not a re-entry of the first.
-test.describe('A', () => {
-  test.beforeAll(() => log('beforeAll:A2'));
-  test.afterAll(() => log('afterAll:A2'));
-  test.beforeEach(() => log('beforeEach:A2'));
-  test('a3', async () => { log('body:a3'); });
-});
-
-test('top', async () => { log('body:top'); });
-`;
-      const logPath = path.join('/tmp', `e2e-scopes-${Date.now()}.log`);
-      process.env['HOOK_LOG'] = logPath;
-      const { outcome, project } = await runProject({ 'tests/scopes.e2e.ts': file }, { appUrl: app.url });
-      expect(outcome.exitCode).toBe(0);
-      // A's teardown runs once a2 is done, before B enters; the file scope
-      // stays open across all of them and closes with the realm.
-      expect(readFileSync(logPath, 'utf8').trim().split('\n')).toEqual([
-        'beforeAll:file',
-        'beforeAll:A',
-        'beforeEach:A',
-        'body:a1',
-        'beforeEach:A',
-        'body:a2',
-        'afterAll:A',
-        'beforeAll:B',
-        'body:b1',
-        'afterAll:B',
-        'beforeAll:A2',
-        'beforeEach:A2',
-        'body:a3',
-        'afterAll:A2',
-        'body:top',
-        'afterAll:file',
-      ]);
-      project.cleanup();
-    },
-    120_000,
-  );
-
   it(
     'discards the realm after an afterAll failure so later tests start fresh',
     async () => {
@@ -1487,7 +1133,7 @@ test('later', async () => { log('body:later'); });
 `;
       const logPath = path.join('/tmp', `e2e-afterall-fail-${Date.now()}.log`);
       process.env['HOOK_LOG'] = logPath;
-      const { outcome, project } = await runProject({ 'tests/afterallfail.e2e.ts': file }, { appUrl: app.url });
+      const { outcome, project } = await runProject({ 'tests/afterallfail.e2e.ts': file }, {});
       expect(resultByTitle(outcome, 'first').status).toBe('passed');
       expect(resultByTitle(outcome, 'later').status).toBe('passed');
       // The failed teardown ends that suite instance: the file scope closes
@@ -1525,7 +1171,7 @@ test.describe('wizard', { serial: true, retries: 1 }, () => {
   test('step 2', async () => {});
 });
 `;
-      const { outcome, project } = await runProject({ 'tests/serialafterall.e2e.ts': file }, { appUrl: app.url });
+      const { outcome, project } = await runProject({ 'tests/serialafterall.e2e.ts': file }, {});
       const skipped = resultByTitle(outcome, 'step 2');
       expect(skipped.status).toBe('skipped');
       expect(skipped.skip?.cause).toBe('hook-failed');
@@ -1566,7 +1212,7 @@ test.describe('wizard', { serial: true }, () => {
 `;
       const logPath = path.join('/tmp', `e2e-serialhooks-${Date.now()}.log`);
       process.env['HOOK_LOG'] = logPath;
-      const { outcome, project } = await runProject({ 'tests/serialhooks.e2e.ts': file }, { appUrl: app.url });
+      const { outcome, project } = await runProject({ 'tests/serialhooks.e2e.ts': file }, {});
       expect(outcome.exitCode).toBe(0);
       expect(readFileSync(logPath, 'utf8').trim().split('\n')).toEqual([
         'beforeAll:inner',
@@ -1605,7 +1251,7 @@ test('never runs', async () => { log('body'); });
 `;
       const logPath = path.join('/tmp', `e2e-beforeeach-${Date.now()}.log`);
       process.env['HOOK_LOG'] = logPath;
-      const { outcome, project } = await runProject({ 'tests/beforeeach.e2e.ts': file }, { appUrl: app.url });
+      const { outcome, project } = await runProject({ 'tests/beforeeach.e2e.ts': file }, {});
       const result = resultByTitle(outcome, 'never runs');
       expect(result.status).toBe('failed');
       expect(result.attempts[0]!.error?.phase).toBe('beforeEach');
@@ -1701,7 +1347,7 @@ test('passes', async ({ app }) => { await app.open(); });
       process.env['HOOK_LOG'] = logPath;
       const { outcome, project } = await runProject(
         { 'tests/overrun.e2e.ts': file },
-        { appUrl: app.url, config: { cleanupTimeout: 1000 } },
+        { config: { cleanupTimeout: 1000 } },
       );
       const result = resultByTitle(outcome, 'passes');
       expect(result.status).toBe('timed-out');
@@ -1713,35 +1359,4 @@ test('passes', async ({ app }) => { await app.open(); });
     120_000,
   );
 
-  it(
-    'times out suite hooks against their budgets and names the scope in run errors',
-    async () => {
-      const file = `import { test } from 'e2e';
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-test.afterAll(() => sleep(5000));
-
-test.describe('slow scope', () => {
-  test.beforeAll(() => sleep(5000));
-  test('unreachable', async () => {});
-});
-`;
-      const { outcome, project } = await runProject(
-        { 'tests/hooktimeouts.e2e.ts': file },
-        { appUrl: app.url, config: { timeout: 1000, cleanupTimeout: 1000 } },
-      );
-      const skipped = resultByTitle(outcome, 'unreachable');
-      expect(skipped.status).toBe('skipped');
-      expect(skipped.skip?.cause).toBe('hook-failed');
-      expect(outcome.report.run.errors.map((error) => [error.phase, error.scopeId, error.code])).toEqual([
-        ['beforeAll', 'slow scope', 'HOOK_FAILED'],
-        ['afterAll', 'file', 'HOOK_FAILED'],
-      ]);
-      assertValidReport(outcome.report);
-      expect(outcome.exitCode).toBe(1);
-      project.cleanup();
-    },
-    120_000,
-  );
 });

@@ -8,20 +8,14 @@
  * owns one `Scene` per attempt and forwards its calls.
  */
 
-import type { LocatorAction, LocatorActionKind, LocatorExpression, SemanticNode } from '../../src/engine/index.ts';
+import type { LocatorAction, LocatorExpression, SemanticNode } from '../../src/engine/index.ts';
 import { engineFailure, obj, parseKey, resolveExpression } from './engine-runtime.ts';
 
 /** The stable id of the observation root; `perform(root, swipe)` is the viewport swipe. */
-export const SCENE_ROOT_ID = 'root';
+const SCENE_ROOT_ID = 'root';
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 type StateKey = keyof NonNullable<SemanticNode['states']>;
-
-/** How one action kind on one node fails instead of performing. */
-export interface ScriptedFailure {
-  readonly code: Parameters<typeof engineFailure>[0];
-  readonly message?: string;
-}
 
 /** One option a `selectOption` picks from. */
 export interface ScriptedOption {
@@ -45,10 +39,6 @@ export interface ScriptedNode extends Mutable<Omit<SemanticNode, 'ref' | 'childr
   appearsAfterSwipes?: number;
   /** Reacts to an action the engine performed on the node, after the built-in semantics ran. */
   on?: (action: LocatorAction, node: ScriptedNode) => void;
-  /** Fails the named action kinds instead of performing them. */
-  fail?: Partial<Record<LocatorActionKind, ScriptedFailure>>;
-  /** The next perform on the node throws a retryable NODE_STALE and gives the node a fresh id. */
-  staleOnce?: boolean;
 }
 
 /** What a scene can schedule while the attempt runs. */
@@ -240,15 +230,6 @@ export function createScene(build: (stage: Stage) => ScriptedNode[], initialLoca
       }
       const node = findById(id);
       if (node === undefined) throw engineFailure('NODE_STALE', `node ${id} is no longer in the tree`, true);
-      if (node.staleOnce === true) {
-        node.staleOnce = false;
-        node.id = `${node.id}~relocated`;
-        throw engineFailure('NODE_STALE', `node ${id} went stale`, true);
-      }
-      const scripted = node.fail?.[action.kind];
-      if (scripted !== undefined) {
-        throw engineFailure(scripted.code, scripted.message ?? `${action.kind} on ${node.id} failed with ${scripted.code}`);
-      }
       apply(node, action);
       node.on?.(action, node);
     },

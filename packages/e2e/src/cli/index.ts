@@ -9,6 +9,7 @@ import { packageVersion } from '../internal/package-version.ts';
 import { classifyError, exitCodeForCategory } from '../internal/errors.ts';
 import type { Shard, TagMode } from '../collect/select.ts';
 import { list, run, type ListedPair, type RunOptions, type RunOutcome } from '../run/runner.ts';
+import { claimRunnerOutput } from './run-output.ts';
 import { explore, STEP_BOUNDS, TIMEOUT_BOUNDS } from '../explore/index.ts';
 import { BUILTIN_REPORTERS, isBuiltinReporter } from '../report/builtin.ts';
 import { bounded } from '../report/format.ts';
@@ -496,7 +497,10 @@ function createProgram(version: string, telemetry: Telemetry): Command {
     )
     .option('--config <path>', 'config file (default: the nearest e2e.config.ts)')
     .option('--target <name>', 'target every session opens on (default: the only target, or the one open_session names)')
-    .option('--headless', 'hide the UI during live sessions (default: headed outside CI)')
+    .option('--headed', 'show the UI in sessions whose open_session does not set headed, when the engine supports it')
+    // Sessions were headed by default before 0.18 and took --headless; a client config that still passes it
+    // asks for the default now, and a refused flag would surface as nothing but a failed connection.
+    .addOption(new Option('--headless').hideHelp())
     .option(
       '--max-sessions <n>',
       `sessions open at once, each with its own browser or device, ${SESSION_BOUNDS.min} through ${SESSION_BOUNDS.max} (default: ${SESSION_BOUNDS.default})`,
@@ -506,12 +510,12 @@ function createProgram(version: string, telemetry: Telemetry): Command {
       'after',
       [
         '',
-        examples(['e2e mcp', 'e2e mcp --target web --headless', 'e2e mcp --max-sessions 8', 'claude mcp add e2e -- npx e2e mcp']),
+        examples(['e2e mcp', 'e2e mcp --target web --headed', 'e2e mcp --max-sessions 8', 'claude mcp add e2e -- npx e2e mcp']),
         '',
         docsLine('/reference/mcp'),
       ].join('\n'),
     )
-    .action(async (options: { config?: string; target?: string; headless?: boolean; maxSessions?: number }) => {
+    .action(async (options: { config?: string; target?: string; headed?: boolean; maxSessions?: number }) => {
       process.exitCode = await mcp(version, options, telemetry);
     });
 
@@ -600,30 +604,36 @@ function createProgram(version: string, telemetry: Telemetry): Command {
         command: Command,
       ) => {
         rejectForwardedFlags(command, files);
-        return runToOutcome(telemetry, command, (signals) =>
-          run({
-            files,
-            configPath: options.config,
-            targetIds: options.target,
-            ...selectionRunOptions(options),
-            headed: options.headed,
-            agent: options.agent,
-            retries: options.retries,
-            workers: options.workers,
-            maxFailures: options.maxFailures,
-            repeatEach: options.repeatEach,
-            reporters: options.reporter,
-            output: options.output,
-            noCache: options.cache === false,
-            strictCache: options.strictCache,
-            debug: options.debug,
-            aiTrace: options.aiTrace,
-            trace: recordingOption(options.trace),
-            video: recordingOption(options.video),
-            interruptSignal: signals.interruptSignal,
-            forceSignal: signals.forceSignal,
-          }),
-        );
+        const output = claimRunnerOutput();
+        try {
+          await runToOutcome(telemetry, command, (signals) =>
+            run({
+              files,
+              configPath: options.config,
+              targetIds: options.target,
+              ...selectionRunOptions(options),
+              headed: options.headed,
+              agent: options.agent,
+              retries: options.retries,
+              workers: options.workers,
+              maxFailures: options.maxFailures,
+              repeatEach: options.repeatEach,
+              reporters: options.reporter,
+              output: options.output,
+              noCache: options.cache === false,
+              strictCache: options.strictCache,
+              debug: options.debug,
+              aiTrace: options.aiTrace,
+              trace: recordingOption(options.trace),
+              video: recordingOption(options.video),
+              interruptSignal: signals.interruptSignal,
+              forceSignal: signals.forceSignal,
+              processOutput: output,
+            }),
+          );
+        } finally {
+          output.end();
+        }
       },
     );
 

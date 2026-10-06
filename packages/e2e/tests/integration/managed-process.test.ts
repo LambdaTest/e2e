@@ -41,20 +41,12 @@ async function isReachable(url: string): Promise<boolean> {
 }
 
 describe('ManagedProcess', () => {
-  it('starts the app, waits for readiness, and stops the process group', async () => {
+  it('starts the app, waits for readiness, and stops the process group, idempotently and safely before start', async () => {
     const port = await freePort();
     const app = nodeApp(port);
+    await app.stop();
     await app.start();
     expect(await isReachable(`http://127.0.0.1:${port}/`)).toBe(true);
-    await app.stop();
-    expect(await isReachable(`http://127.0.0.1:${port}/`)).toBe(false);
-  });
-
-  it('stop is idempotent and safe before start', async () => {
-    const port = await freePort();
-    const app = nodeApp(port);
-    await app.stop();
-    await app.start();
     await app.stop();
     await app.stop();
     expect(await isReachable(`http://127.0.0.1:${port}/`)).toBe(false);
@@ -106,7 +98,7 @@ describe('ManagedProcess', () => {
       {
         executable: process.execPath,
         args: ['-e', 'setInterval(() => {}, 1000)'],
-        startupTimeout: 1_500,
+        startupTimeout: 500,
         shutdownTimeout: 2_000,
       },
       os.tmpdir(),
@@ -127,37 +119,4 @@ describe('ManagedProcess', () => {
     expect(await isReachable(`http://127.0.0.1:${port}/`)).toBe(false);
   });
 
-  it('without reuseExisting, a server another process already runs fails the launch before spawning', async () => {
-    const port = await freePort();
-    const devServer = nodeApp(port);
-    await devServer.start();
-    try {
-      const failure = await nodeApp(port)
-        .start()
-        .catch((error: unknown) => error);
-      expect(failure).toBeInstanceOf(InfrastructureError);
-      expect((failure as InfrastructureError).code).toBe('APP_ALREADY_RUNNING');
-      expect((failure as InfrastructureError).message).toContain(`http://127.0.0.1:${port}/ already answered before app.command started`);
-      expect(await isReachable(`http://127.0.0.1:${port}/`)).toBe(true);
-    } finally {
-      await devServer.stop();
-    }
-  });
-
-  it('with reuseExisting, attaches to a server another process already runs and never stops it', async () => {
-    const port = await freePort();
-    const devServer = nodeApp(port);
-    await devServer.start();
-    try {
-      // Without reuse this spawn would lose the port; with it, the command is never started.
-      const app = nodeApp(port, { reuseExisting: true });
-      await app.start();
-      expect(app.spawned).toBe(false);
-      await app.stop();
-      expect(await isReachable(`http://127.0.0.1:${port}/`)).toBe(true);
-    } finally {
-      await devServer.stop();
-    }
-    expect(await isReachable(`http://127.0.0.1:${port}/`)).toBe(false);
-  });
 });

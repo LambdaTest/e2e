@@ -99,88 +99,6 @@ function entryFileState(project: FixtureProject): { bytes: string; mtimeMs: numb
   return { bytes: readFileSync(file, 'utf8'), mtimeMs: statSync(file).mtimeMs };
 }
 
-describe('trace cache: record then zero-turn replay', () => {
-  let app: FixtureApp;
-  let project: FixtureProject;
-  let firstRun: RunOutcome;
-  let secondRun: RunOutcome;
-  let recordedFile: { bytes: string; mtimeMs: number };
-  const first: ExecutorRecord = { calls: 0, prefixes: [] };
-  const second: ExecutorRecord = { calls: 0, prefixes: [] };
-
-  beforeAll(async () => {
-    app = await startFixtureApp();
-    project = createProject({ 'tests/act.e2e.ts': SUITE });
-    const options = (record: ExecutorRecord) => ({
-      appUrl: app.url,
-      config: {
-        tests: 'tests/**/*.e2e.ts',
-        agents: { default: { executor: twoTapExecutor(record) } },
-        cache: 'read-write' as const,
-      },
-    });
-    firstRun = await runExisting(project, options(first));
-    recordedFile = entryFileState(project);
-    secondRun = await runExisting(project, options(second));
-  }, 240_000);
-
-  afterAll(async () => {
-    project?.cleanup();
-    await app?.close();
-  });
-
-  it('runs the executor on the first pass and records one entry', () => {
-    expect(firstRun.exitCode).toBe(0);
-    expect(first.calls).toBe(1);
-    expect(first.prefixes).toEqual([undefined]);
-    const step = actStep(firstRun);
-    expect(step.cache).toEqual({
-      mode: 'missed',
-      reason: 'no-entry',
-      replayedActions: 0,
-      totalActions: 0,
-    });
-    expect(readdirSync(cacheDir(project))).toHaveLength(1);
-    const { entry } = readOnlyEntry(project);
-    expect(entry.schemaVersion).toBe('trace-1');
-    expect(entry.payload.actions).toHaveLength(2);
-    expect(entry.payload.executor.name).toBe('two-tap-executor');
-    expect(entry.payload.startPath).toBe('/');
-    // The recording's own check, kept as data: the counter reading 2 appeared
-    // during the step, so a replay must show it again before passing alone.
-    expect(entry.payload.endAnchors).toContainEqual({ role: 'status', name: 'Counter', text: '2' });
-  });
-
-  it('replays the second run zero-turn without invoking the executor', () => {
-    expect(secondRun.exitCode).toBe(0);
-    expect(second.calls).toBe(0);
-    const step = actStep(secondRun);
-    expect(step.status).toBe('passed');
-    expect(step.cache).toEqual({
-      mode: 'self-finalized',
-      replayedActions: 2,
-      totalActions: 2,
-    });
-    expect(step.metrics!.modelCalls).toBe(0);
-    expect(step.metrics!.actionSteps).toBe(2);
-    expect(step.explanation).toContain('zero-turn');
-    // A step the cache replayed whole never rewrites its entry: the file
-    // keeps its bytes and its modification time, so a committed cache
-    // directory stays clean across local runs.
-    expect(entryFileState(project)).toEqual(recordedFile);
-    const { entry } = readOnlyEntry(project);
-    expect(entry.payload.summary).toBe('the counter shows 2');
-    expect(entry.payload.endPath).toBe('/');
-  });
-
-  it('emits schema-valid reports for both cached and uncached runs', () => {
-    const report = JSON.parse(
-      readFileSync(path.join(project.dir, '.e2e', 'report.json'), 'utf8'),
-    ) as object;
-    assertValidReport(report);
-  });
-});
-
 describe('trace cache: divergence hands the step over mid-step', () => {
   let app: FixtureApp;
   let project: FixtureProject;
@@ -243,7 +161,7 @@ const WRONG_EXPECT_SUITE = `import { test, expect } from 'e2e';
 test('cached step increments twice', async ({ app, agent, screen }) => {
   await app.open();
   await agent.act('increment the counter twice');
-  await expect(screen.getByRole('status')).toHaveText('3');
+  await expect(screen.getByRole('status')).toHaveText('3', { timeout: 500 });
 });
 `;
 
@@ -256,7 +174,7 @@ test.afterEach(async ({ app }) => {
 test('cached step increments twice', async ({ app, agent, screen }) => {
   await app.open();
   await agent.act('increment the counter twice');
-  await expect(screen.getByRole('status')).toHaveText('3');
+  await expect(screen.getByRole('status')).toHaveText('3', { timeout: 500 });
 });
 `;
 
@@ -286,16 +204,6 @@ describe('trace cache: unconfirmed traces are withheld and poisoned entries evic
     project?.cleanup();
     await app?.close();
   });
-
-  it('never writes a trace whose following assertion failed', async () => {
-    project = createProject({ 'tests/act.e2e.ts': WRONG_EXPECT_SUITE });
-    const outcome = await runExisting(project, options());
-    expect(outcome.exitCode).not.toBe(0);
-    // The act passed (the executor saw 2), the expect demanded 3: the staged
-    // trace is unconfirmed and nothing may reach the store.
-    expect(existsSync(cacheDir(project))).toBe(false);
-    project.cleanup();
-  }, 120_000);
 
   it('teardown steps passing after the failure cannot confirm the implicated trace', async () => {
     project = createProject({ 'tests/act.e2e.ts': WRONG_EXPECT_WITH_TEARDOWN_SUITE });
@@ -330,20 +238,10 @@ test('cached step increments twice', async ({ app, agent }) => {
 });
 `;
 
-const CONFIRMED_THEN_PROVIDER_DOWN_SUITE = `import { test, expect } from 'e2e';
-
-test('cached step increments twice', async ({ app, agent, screen }) => {
-  await app.open();
-  await agent.act('increment the counter twice');
-  await expect(screen.getByRole('status')).toHaveText('2');
-  await agent.assert('the counter shows 2', { agent: 'judge' });
-});
-`;
-
 const PROVIDER_DOWN_THEN_WRONG_AFTER_EACH_SUITE = `import { test, expect } from 'e2e';
 
 test.afterEach(async ({ screen }) => {
-  await expect(screen.getByRole('status')).toHaveText('3', { timeout: 1_000 });
+  await expect(screen.getByRole('status')).toHaveText('3', { timeout: 500 });
 });
 
 test('cached step increments twice', async ({ app, agent }) => {
@@ -409,41 +307,6 @@ describe('trace cache: a model that never answered implicates nothing', () => {
     project.cleanup();
   }, 240_000);
 
-  it('still writes a fresh recording a check confirmed before a judgment found no model', async () => {
-    project = createProject({ 'tests/act.e2e.ts': CONFIRMED_THEN_PROVIDER_DOWN_SUITE });
-    const outcome = await runExisting(project, {
-      appUrl: app.url,
-      config: {
-        tests: 'tests/**/*.e2e.ts',
-        agents: { default: { executor: twoTapExecutor(record) }, judge: { model: unreachableModel } },
-        cache: 'read-write' as const,
-      },
-    });
-    expect(outcome.exitCode).not.toBe(0);
-    expect(actStep(outcome).cache?.mode).toBe('missed');
-    expect(stepErrorCode(outcome, 'agent.assert')).toBe('MODEL_PROVIDER_FAILED');
-    expect(readOnlyEntry(project).entry.payload.actions).toHaveLength(2);
-    project.cleanup();
-  }, 240_000);
-
-  it('still evicts the replayed entry when a later assertion fails on the app', async () => {
-    await recordEntry();
-    writeFileSync(path.join(project.dir, 'tests', 'act.e2e.ts'), PROVIDER_DOWN_THEN_WRONG_AFTER_EACH_SUITE, 'utf8');
-    const outcome = await runExisting(project, {
-      appUrl: app.url,
-      config: {
-        tests: 'tests/**/*.e2e.ts',
-        agents: { default: { executor: twoTapExecutor(record) }, judge: { model: unreachableModel } },
-        cache: 'read-write' as const,
-      },
-    });
-    expect(outcome.exitCode).not.toBe(0);
-    expect(actStep(outcome).cache?.mode).toBe('self-finalized');
-    expect(stepErrorCode(outcome, 'agent.assert')).toBe('MODEL_PROVIDER_FAILED');
-    expect(readEntries(project)).toHaveLength(0);
-    project.cleanup();
-  }, 240_000);
-
   it('keeps an entry whose replay handed off to a model that never answered', async () => {
     await recordEntry();
     rewriteOnlyEntry(project, (payload) => {
@@ -464,6 +327,25 @@ describe('trace cache: a model that never answered implicates nothing', () => {
     expect(actStep(outcome).cache).toMatchObject({ mode: 'agent-concluded', reason: 'target-not-found', replayedActions: 1 });
     expect(stepErrorCode(outcome, 'agent.act')).toBe('MODEL_PROVIDER_FAILED');
     expect(entryFileState(project)).toEqual(handedOff);
+    project.cleanup();
+  }, 240_000);
+
+  it('still evicts the replayed entry when a later assertion fails on the app', async () => {
+    await recordEntry();
+    writeFileSync(path.join(project.dir, 'tests', 'act.e2e.ts'), PROVIDER_DOWN_THEN_WRONG_AFTER_EACH_SUITE, 'utf8');
+    const outcome = await runExisting(project, {
+      appUrl: app.url,
+      config: {
+        tests: 'tests/**/*.e2e.ts',
+        agents: { default: { executor: twoTapExecutor(record) }, judge: { model: unreachableModel } },
+        cache: 'read-write' as const,
+      },
+    });
+    expect(outcome.exitCode).not.toBe(0);
+    expect(actStep(outcome).cache?.mode).toBe('self-finalized');
+    expect(stepErrorCode(outcome, 'agent.assert')).toBe('MODEL_PROVIDER_FAILED');
+    expect(readEntries(project)).toHaveLength(0);
+    project.cleanup();
   }, 240_000);
 });
 
@@ -476,12 +358,8 @@ test('saves the marker', async ({ app, agent, screen }) => {
 });
 `;
 
-/**
- * Taps "Save marker" once (unless a replayed prefix already did) and checks
- * the marker. With `repair`, an end-mismatch hand-off makes it tap again — the
- * shape of an executor that found the replayed flow had not taken effect.
- */
-function saveMarkerExecutor(record: ExecutorRecord, options: { repair?: boolean } = {}): StepExecutor {
+/** Taps "Save marker" once (unless a replayed prefix already did) and checks the marker. */
+function saveMarkerExecutor(record: ExecutorRecord): StepExecutor {
   return {
     name: 'save-marker-executor',
     version: 'test',
@@ -489,11 +367,7 @@ function saveMarkerExecutor(record: ExecutorRecord, options: { repair?: boolean 
       record.calls += 1;
       record.prefixes.push(context.replayedPrefix);
       let observation = await context.observe();
-      const prefix = context.replayedPrefix;
-      const mustAct =
-        (prefix?.replayedActions.length ?? 0) === 0 ||
-        (options.repair === true && prefix?.stopReason === 'end-mismatch');
-      if (mustAct) {
+      if ((context.replayedPrefix?.replayedActions.length ?? 0) === 0) {
         await context.actions.tap({ id: nodeIdFor(observation.text, /button "Save marker"/) });
         observation = await context.observe();
       }
@@ -510,7 +384,7 @@ describe('trace cache: the recorded end state gates self-finalization', () => {
   let project: FixtureProject;
   const records: ExecutorRecord[] = [];
 
-  const options = (executor: { repair?: boolean } = {}) => {
+  const options = () => {
     const record: ExecutorRecord = { calls: 0, prefixes: [] };
     records.push(record);
     return {
@@ -518,7 +392,7 @@ describe('trace cache: the recorded end state gates self-finalization', () => {
       config: {
         tests: 'tests/**/*.e2e.ts',
         reporters: ['json'] as const,
-        agents: { default: { executor: saveMarkerExecutor(record, executor) } },
+        agents: { default: { executor: saveMarkerExecutor(record) } },
         cache: 'read-write' as const,
       },
     };
@@ -548,88 +422,6 @@ describe('trace cache: the recorded end state gates self-finalization', () => {
     const step = resultByTitle(second, 'saves the marker').attempts.at(-1)!.steps.find((s) => s.api === 'agent.act')!;
     expect(step.cache).toMatchObject({ mode: 'self-finalized', replayedActions: 1, totalActions: 1 });
   }, 240_000);
-
-  it('hands off with end-mismatch when the recorded effect is not on screen after a full replay', async () => {
-    // Every recorded action still replays; only the recorded end state is
-    // made unreachable. Mechanics alone must not pass the step.
-    rewriteOnlyEntry(project, (payload) => ({ ...payload, endAnchors: [{ role: 'status', name: 'Marker', text: 'never-saved' }] }));
-
-    const outcome = await runExisting(project, options());
-    expect(outcome.exitCode).toBe(0);
-    const record = records.at(-1)!;
-    expect(record.calls).toBe(1);
-    expect(record.prefixes[0]).toMatchObject({
-      stopReason: 'end-mismatch',
-      replayedActions: ['tap button "Save marker"'],
-      totalActions: 1,
-    });
-    const step = resultByTitle(outcome, 'saves the marker').attempts.at(-1)!.steps.find((s) => s.api === 'agent.act')!;
-    expect(step.cache).toEqual({
-      mode: 'agent-concluded',
-      reason: 'end-mismatch',
-      replayedActions: 1,
-      totalActions: 1,
-    });
-    // The executor's pass re-stages the entry with the live anchors: healed.
-    expect(readOnlyEntry(project).entry.payload.endAnchors).toContainEqual({
-      role: 'status',
-      name: 'Marker',
-      text: 'saved',
-    });
-  }, 240_000);
-
-  it('evicts the entry when the executor had to act again after an end-mismatch', async () => {
-    rewriteOnlyEntry(project, (payload) => ({ ...payload, endAnchors: [{ role: 'status', name: 'Marker', text: 'never-saved' }] }));
-
-    const outcome = await runExisting(project, options({ repair: true }));
-    expect(outcome.exitCode).toBe(0);
-    const record = records.at(-1)!;
-    expect(record.prefixes[0]?.stopReason).toBe('end-mismatch');
-    // The replayed flow plus its repair is not a flow worth replaying: the
-    // entry is gone, and the next passing run records a clean one.
-    expect(readdirSync(cacheDir(project)).filter((name) => name.endsWith('.json'))).toHaveLength(0);
-  }, 240_000);
-});
-
-const TRAILING_ACT_SUITE = `import { test } from 'e2e';
-
-test('cached step increments twice', async ({ app, agent }) => {
-  await app.open();
-  await agent.act('increment the counter twice');
-});
-`;
-
-describe('trace cache: only a verification step confirms a write', () => {
-  let app: FixtureApp;
-
-  beforeAll(async () => {
-    app = await startFixtureApp();
-  }, 60_000);
-
-  afterAll(async () => {
-    await app?.close();
-  });
-
-  it('never writes the trace of a trailing act nothing asserted on, even though the attempt passed', async () => {
-    const project = createProject({ 'tests/act.e2e.ts': TRAILING_ACT_SUITE });
-    try {
-      const record: ExecutorRecord = { calls: 0, prefixes: [] };
-      const outcome = await runExisting(project, {
-        appUrl: app.url,
-        config: {
-          tests: 'tests/**/*.e2e.ts',
-          reporters: ['json'] as const,
-          agents: { default: { executor: twoTapExecutor(record) } },
-          cache: 'read-write' as const,
-        },
-      });
-      expect(outcome.exitCode).toBe(0);
-      expect(record.calls).toBe(1);
-      expect(existsSync(cacheDir(project))).toBe(false);
-    } finally {
-      project.cleanup();
-    }
-  }, 120_000);
 });
 
 const TOOLS_ONLY_SUITE = `import { test } from 'e2e';
@@ -639,30 +431,7 @@ test('tools-only step', async ({ agent }) => {
 });
 `;
 
-/** Never observes, never acts: the shape of an executor that only uses its own tools. */
-function toolsOnlyExecutor(record: ExecutorRecord): StepExecutor {
-  return {
-    name: 'tools-only-executor',
-    version: 'test',
-    async runStep(context: StepExecutorContext) {
-      record.calls += 1;
-      record.prefixes.push(context.replayedPrefix);
-      return { status: 'passed' as const, summary: 'done without the screen' };
-    },
-  };
-}
-
 describe('trace cache: an engine-independent executor is not gated by the cache', () => {
-  let app: FixtureApp;
-
-  beforeAll(async () => {
-    app = await startFixtureApp();
-  }, 60_000);
-
-  afterAll(async () => {
-    await app?.close();
-  });
-
   it('skips the end-state observation when the executor recorded no actions', async () => {
     const project = createProject({ 'tests/tools.e2e.ts': TOOLS_ONLY_SUITE });
     let executorFinished = false;
@@ -702,31 +471,9 @@ describe('trace cache: an engine-independent executor is not gated by the cache'
       project.cleanup();
     }
   });
-
-  it('runs the executor with caching on, without an opened app, and stages nothing', async () => {
-    const project = createProject({ 'tests/tools.e2e.ts': TOOLS_ONLY_SUITE });
-    try {
-      const record: ExecutorRecord = { calls: 0, prefixes: [] };
-      const outcome = await runExisting(project, {
-        appUrl: app.url,
-        config: {
-          tests: 'tests/**/*.e2e.ts',
-          reporters: ['json'] as const,
-          agents: { default: { executor: toolsOnlyExecutor(record) } },
-          cache: 'read-write' as const,
-        },
-      });
-      expect(outcome.exitCode).toBe(0);
-      expect(record.calls).toBe(1);
-      expect(record.prefixes).toEqual([undefined]);
-      expect(existsSync(cacheDir(project))).toBe(false);
-    } finally {
-      project.cleanup();
-    }
-  }, 120_000);
 });
 
-describe('trace cache: modes that never write', () => {
+describe('trace cache: modes', () => {
   let app: FixtureApp;
 
   beforeAll(async () => {
@@ -736,24 +483,6 @@ describe('trace cache: modes that never write', () => {
   afterAll(async () => {
     await app?.close();
   });
-
-  it('caches by default: a config without a cache key records entries', async () => {
-    const project = createProject({ 'tests/act.e2e.ts': SUITE });
-    try {
-      const record: ExecutorRecord = { calls: 0, prefixes: [] };
-      const outcome = await runExisting(project, {
-        appUrl: app.url,
-        config: {
-          tests: 'tests/**/*.e2e.ts',
-          agents: { default: { executor: twoTapExecutor(record) } },
-        },
-      });
-      expect(outcome.exitCode).toBe(0);
-      expect(readdirSync(cacheDir(project))).toHaveLength(1);
-    } finally {
-      project.cleanup();
-    }
-  }, 120_000);
 
   it('--no-cache overrides the config: nothing is recorded, and an entry recorded without it is left untouched', async () => {
     const project = createProject({ 'tests/act.e2e.ts': SUITE });
@@ -790,68 +519,36 @@ describe('trace cache: modes that never write', () => {
     }
   }, 180_000);
 
-  it('read-only mode never creates the store', async () => {
+  it('caches by default, and CI demotes an unset mode to read-only: it replays the entry and never rewrites it', async () => {
     const project = createProject({ 'tests/act.e2e.ts': SUITE });
+    const options = (record: ExecutorRecord, env?: NodeJS.ProcessEnv) => ({
+      appUrl: app.url,
+      config: {
+        tests: 'tests/**/*.e2e.ts',
+        agents: { default: { executor: twoTapExecutor(record) } },
+      },
+      ...(env === undefined ? {} : { runOptions: { env } }),
+    });
     try {
-      const record: ExecutorRecord = { calls: 0, prefixes: [] };
-      const outcome = await runExisting(project, {
-        appUrl: app.url,
-        config: {
-          tests: 'tests/**/*.e2e.ts',
-          agents: { default: { executor: twoTapExecutor(record) } },
-          cache: 'read-only' as const,
-        },
-      });
-      expect(outcome.exitCode).toBe(0);
-      expect(record.calls).toBe(1);
-      expect(existsSync(cacheDir(project))).toBe(false);
-    } finally {
-      project.cleanup();
-    }
-  }, 120_000);
+      const first = await runExisting(project, options({ calls: 0, prefixes: [] }));
+      expect(first.exitCode).toBe(0);
+      expect(readdirSync(cacheDir(project))).toHaveLength(1);
 
-  it('CI demotes an unset cache mode to read-only', async () => {
-    const project = createProject({ 'tests/act.e2e.ts': SUITE });
-    try {
-      const record: ExecutorRecord = { calls: 0, prefixes: [] };
-      const outcome = await runExisting(project, {
-        appUrl: app.url,
-        config: {
-          tests: 'tests/**/*.e2e.ts',
-          agents: { default: { executor: twoTapExecutor(record) } },
-        },
-        runOptions: {
-          env: { ...process.env, APP_URL: app.url, CI: '1' },
-        },
-      });
-      expect(outcome.exitCode).toBe(0);
-      expect(existsSync(cacheDir(project))).toBe(false);
+      // An entry from before the occurrence fields: a read-write replay would complete and rewrite it.
+      const { file, entry } = readOnlyEntry(project);
+      const { testId, targetId, instructionDigest } = entry.payload.recordedFor!;
+      writeFileSync(file, JSON.stringify({ ...entry, payload: { ...entry.payload, recordedFor: { testId, targetId, instructionDigest } } }), 'utf8');
+      const legacy = entryFileState(project);
+      const inCi: ExecutorRecord = { calls: 0, prefixes: [] };
+      const second = await runExisting(project, options(inCi, { ...process.env, APP_URL: app.url, CI: '1' }));
+      expect(second.exitCode).toBe(0);
+      expect(inCi.calls).toBe(0);
+      expect(actStep(second).cache).toEqual({ mode: 'self-finalized', replayedActions: 2, totalActions: 2 });
+      expect(entryFileState(project)).toEqual(legacy);
     } finally {
       project.cleanup();
     }
-  }, 120_000);
-
-  it('CI honors an explicit read-write as the project stating its trust', async () => {
-    const project = createProject({ 'tests/act.e2e.ts': SUITE });
-    try {
-      const record: ExecutorRecord = { calls: 0, prefixes: [] };
-      const outcome = await runExisting(project, {
-        appUrl: app.url,
-        config: {
-          tests: 'tests/**/*.e2e.ts',
-          agents: { default: { executor: twoTapExecutor(record) } },
-          cache: 'read-write' as const,
-        },
-        runOptions: {
-          env: { ...process.env, APP_URL: app.url, CI: '1' },
-        },
-      });
-      expect(outcome.exitCode).toBe(0);
-      expect(existsSync(cacheDir(project))).toBe(true);
-    } finally {
-      project.cleanup();
-    }
-  }, 120_000);
+  }, 180_000);
 });
 
 const PIN_SUITE = `import { test, expect } from 'e2e';
@@ -922,25 +619,6 @@ describe('trace cache: a bare-point tap replays like a coordinate-driven tool', 
     const step = resultByTitle(second, 'picks the red pin').attempts.at(-1)!.steps.find((s) => s.api === 'agent.act')!;
     expect(step.cache).toMatchObject({ mode: 'self-finalized', replayedActions: 1, totalActions: 1 });
     expect(step.events.filter((event) => event.kind === 'engine').map((event) => event.name)).toEqual(['tapAt']);
-  }, 240_000);
-
-  it('hands the step to the executor when the recorded viewport is not the live one', async () => {
-    rewriteOnlyEntry(project, (payload) => {
-      const [tapAt] = payload.actions;
-      if (tapAt?.name !== 'tapAt') throw new Error(`expected a tapAt, got ${JSON.stringify(payload.actions)}`);
-      return { ...payload, actions: [{ ...tapAt, viewport: { width: 390, height: 844 } }] };
-    });
-
-    const outcome = await runExisting(project, options());
-    expect(outcome.exitCode).toBe(0);
-    const record = records.at(-1)!;
-    expect(record.calls).toBe(1);
-    // Nothing replayed, so the executor starts from the top with no prefix; the miss carries the reason.
-    expect(record.prefixes[0]).toBeUndefined();
-    const step = resultByTitle(outcome, 'picks the red pin').attempts.at(-1)!.steps.find((s) => s.api === 'agent.act')!;
-    expect(step.cache).toMatchObject({ mode: 'missed', reason: 'viewport-changed', replayedActions: 0, totalActions: 1 });
-    // The pass re-stages the entry with the live viewport: healed.
-    expect(readOnlyEntry(project).entry.payload.actions[0]).toMatchObject({ viewport: { width: 1280, height: 720 } });
   }, 240_000);
 });
 

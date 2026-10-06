@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { attemptSegments, claimRerunDir, pruneArtifacts } from '../../src/run/artifacts.ts';
+import { claimRerunDir, pruneArtifacts } from '../../src/run/artifacts.ts';
 
 let root: string;
 
@@ -76,13 +76,5 @@ describe('claimRerunDir', () => {
   it('creates the root when the tree is not there', async () => {
     expect(await claimRerunDir(root)).toBe('rerun-1');
     expect(existsSync(path.join(root, 'rerun-1'))).toBe(true);
-  });
-});
-
-describe('attemptSegments', () => {
-  it("files a rerun's attempt under its directory, and a full run's at the root", () => {
-    const segments = ['web', 'tests_a.e2e.ts__a', 'default', 'attempt-0'];
-    expect(attemptSegments(undefined, segments)).toEqual(segments);
-    expect(attemptSegments('rerun-2', segments)).toEqual(['rerun-2', ...segments]);
   });
 });

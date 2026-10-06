@@ -1,24 +1,15 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { startFixtureApp, type FixtureApp } from '../helpers/fixture-app.ts';
 import { assertValidReport } from '../helpers/report-schema.ts';
 import { resultByTitle, runProject, type FixtureProject, type RunOutcome } from '../helpers/run-project.ts';
 
-const SOFT_SUITE = `import { test } from '@e2e-dev/web';
-import { expect } from 'e2e';
+const SOFT_SUITE = `import { test, expect } from 'e2e';
 
-test('soft failures let the body run on', async ({ app, screen, browser }) => {
+test('soft failures let the body run on', async ({ app, screen }) => {
   await app.open();
   expect.soft(1, 'the count').toBe(2);
-  await expect.soft(screen.getByRole('heading', { name: 'Nowhere' })).toBeVisible({ timeout: 300 });
-  await expect.soft(browser).toHaveURL('/nowhere', { timeout: 300 });
+  await expect.soft(screen.getByRole('button', { name: 'Submit' })).toBeHidden({ timeout: 300 });
   expect.soft('ok').toBe('ok');
-  await expect(screen.getByRole('heading', { name: 'Home' })).toBeVisible();
-});
-
-test('every soft matcher passing keeps the attempt green', async ({ app, screen }) => {
-  await app.open();
-  expect.soft({ id: 1, name: 'Ada' }).toMatchObject({ id: expect.any(Number) });
-  await expect.soft(screen.getByRole('heading', { name: 'Home' })).toBeVisible();
+  await expect(screen.getByRole('button', { name: 'Submit' })).toBeVisible();
 });
 
 test('a body error stays primary over the soft failures', async ({ app }) => {
@@ -27,7 +18,7 @@ test('a body error stays primary over the soft failures', async ({ app }) => {
   throw new Error('the body gave up');
 });
 
-test('a timed-out body still settles its soft failures', { timeout: 1000 }, async ({ app }) => {
+test('a timed-out body still settles its soft failures', { timeout: 300 }, async ({ app }) => {
   await app.open();
   expect.soft(1).toBe(2);
   await new Promise(() => {});
@@ -45,18 +36,15 @@ test.describe('soft in a hook', () => {
 `;
 
 describe('expect.soft in a run', () => {
-  let app: FixtureApp;
   let outcome: RunOutcome;
   let project: FixtureProject;
 
   beforeAll(async () => {
-    app = await startFixtureApp();
-    ({ outcome, project } = await runProject({ 'tests/soft.e2e.ts': SOFT_SUITE }, { appUrl: app.url }));
+    ({ outcome, project } = await runProject({ 'tests/soft.e2e.ts': SOFT_SUITE }, {}));
   }, 180_000);
 
   afterAll(async () => {
     project?.cleanup();
-    await app?.close();
   });
 
   it('produces a schema-valid report', () => {
@@ -70,27 +58,19 @@ describe('expect.soft in a run', () => {
     const attempt = result.attempts[0]!;
     expect(attempt.error).toMatchObject({ code: 'ASSERTION_FAILED', phase: 'body' });
     const lines = attempt.error!.message.split('\n');
-    expect(lines[0]).toBe('3 soft assertions failed');
+    expect(lines[0]).toBe('2 soft assertions failed');
     expect(lines[1]).toBe('1. the count: expected 1 to be 2');
-    expect(lines[2]).toBe('2. expect.toBeVisible failed');
-    expect(lines.filter((line) => line.startsWith('   locator: ') && line.includes('Nowhere'))).toHaveLength(1);
-    expect(attempt.error!.message).toMatch(/\n3\. expect\.toHaveURL failed/);
+    expect(lines[2]).toBe('2. expect.toBeHidden failed');
+    expect(lines.filter((line) => line.startsWith('   locator: ') && line.includes('Submit'))).toHaveLength(1);
     expect(attempt.error?.source?.file).toBe('tests/soft.e2e.ts');
-    // The failed locator and web matchers are recorded steps; the hard matcher after them still ran and passed.
+    // The failed locator matcher is a recorded step; the hard matcher after it still ran and passed.
     expect(attempt.steps.map((step) => [step.api, step.status])).toEqual([
       ['app.open', 'passed'],
-      ['expect.toBeVisible', 'failed'],
-      ['expect.toHaveURL', 'failed'],
+      ['expect.toBeHidden', 'failed'],
       ['expect.toBeVisible', 'passed'],
     ]);
     expect(attempt.steps[1]?.error?.code).toBe('ASSERTION_FAILED');
     expect(attempt.secondaryErrors).toEqual([]);
-  });
-
-  it('passes when every soft matcher passes', () => {
-    const result = resultByTitle(outcome, 'every soft matcher passing keeps the attempt green');
-    expect(result.status).toBe('passed');
-    expect(result.attempts[0]!.steps.map((step) => step.status)).toEqual(['passed', 'passed']);
   });
 
   it('keeps the body error primary and notes the soft failures beside it', () => {

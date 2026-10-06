@@ -1,6 +1,7 @@
 ---
 title: Browser
 description: The browser engine, its options, and the browser fixture it contributes.
+icon: "globe"
 ---
 
 `@e2e-dev/web` drives Chromium, Firefox, and WebKit through Playwright.
@@ -162,7 +163,7 @@ That protection is text only: unlike a fill, it withholds no screenshot or
 model pixels, so a page that renders the password on screen is not masked in
 them ([Security](/security#secrets)).
 
-`headers` and `basicAuth` are how a test reaches a [protected preview](/starting-your-app#protected-previews).
+`headers` and `basicAuth` are how a test reaches a [protected preview](/web#protected-previews).
 
 `screencast` shapes the recording, not which attempts record: that is the
 config's [`video`](/reference/config#video) mode. `size` takes whole pixels,
@@ -291,7 +292,7 @@ export interface Browser extends Expectable<BrowserExpectation> {
   locator(selector: string): Locator;
   /** Creates a screen query scope inside one iframe. */
   frameLocator(selector: string): FrameScreen;
-  /** Evaluates trusted test code in the page. */
+  /** Evaluates trusted test code in the page: a function, or a string expression whose value is returned, called first if it is a function. */
   evaluate<T extends JsonValue>(fn: string | (() => T | Promise<T>)): Promise<T>;
   /** Evaluates trusted test code with one required JSON-safe argument. */
   evaluate<T extends JsonValue, Arg extends JsonValue>(
@@ -428,6 +429,10 @@ close over anything outside its own body; helpers declared inside the body
 work. Pass outside values through `arg`. Both `arg` and the return value
 must be `JsonValue`, otherwise the call fails with `INVALID_ARGUMENT`.
 
+A string is evaluated as a single expression, not as statements. If it
+evaluates to a function, that function is called with `arg`; otherwise its
+value is the result. A promise, from either, is awaited.
+
 An exception in the evaluated code is `EVALUATE_FAILED` with its message. A
 Playwright timeout is `ACTION_FAILED`; a closed page or lost context is
 `ENGINE_FAILURE`.
@@ -438,6 +443,7 @@ const flag = await browser.evaluate(
   (name: string) => window.localStorage.getItem(name),
   'featureFlags',
 );
+const title = await browser.evaluate<string>('document.title');
 ```
 
 ### Init scripts

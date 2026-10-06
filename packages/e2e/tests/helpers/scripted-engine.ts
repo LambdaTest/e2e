@@ -207,19 +207,5 @@ export function scene(stage: Stage): ScriptedNode[] {
     progress,
     save,
     growing,
-    { id: 'below', role: 'button', name: 'Below the fold', appearsAfterSwipes: 2 },
-    { id: 'stale', role: 'button', name: 'Stale', staleOnce: true },
-    {
-      id: 'flaky',
-      role: 'button',
-      name: 'Flaky',
-      fail: { tap: { code: 'NOT_ACTIONABLE', message: 'covered by an overlay' } },
-    },
-    {
-      id: 'commit',
-      role: 'button',
-      name: 'Commit',
-      fail: { tap: { code: 'ACTION_MAY_HAVE_COMMITTED', message: 'the tap may have landed' } },
-    },
   ];
 }

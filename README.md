@@ -7,6 +7,10 @@
   <a href="https://tester.army/discord"><img alt="Join the community on Discord" src="https://img.shields.io/badge/Join%20the%20community-5865F2.svg?style=for-the-badge&logo=discord&logoColor=white&labelColor=000000" /></a>
 </p>
 
+<p align="center">
+  <a href="https://www.star-history.com/tester-army/e2e"><picture><source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/badge?repo=tester-army/e2e&type=trending&theme=dark" /><img alt="GitHub Trending Repository of the Day" src="https://api.star-history.com/badge?repo=tester-army/e2e&type=trending" /></picture></a>
+</p>
+
 # e2e
 
 [e2e](https://tester.army/e2e?utm_source=e2e&utm_medium=github&utm_campaign=readme_intro) is an end-to-end testing framework for web and mobile apps. Describe a goal in natural language and an agent drives the app to reach it. Check the result with locators and assertions in the same test.
@@ -39,6 +43,11 @@ npx e2e init
 `init` asks for an engine, web or mobile, and a model provider, then writes a
 config and an example test. The
 [quickstart](https://e2e.tester.army/docs/quickstart) covers the rest.
+
+To see a finished setup in your stack, open
+[`examples/`](https://github.com/tester-army/e2e/tree/main/examples):
+Vite, Next.js, Expo, and SwiftUI, each a standalone project with a passing
+suite.
 
 ## Packages
 
