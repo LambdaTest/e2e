@@ -75,7 +75,45 @@ whole session instead, found by the session's build and name and starting
 at the session's start time. Runs that overlap and share a fixed `build`
 and `sessionName` can link each other's videos; the defaults never do.
 
-Full documentation lives at [e2e.tester.army/docs/integrations/testmu](https://e2e.tester.army/docs/integrations/testmu).
+## Browsers
+
+`web({ browser: testmuBrowsers() })` runs a web target in TestMu AI's hosted
+Chrome or Edge on Windows and macOS, one session per worker slot, or one per
+attempt with `scope: 'attempt'`. It is exported from `@e2e-dev/testmu/web`,
+which needs only `@e2e-dev/web`; the package root exports the device
+provider.
+
+```ts title="e2e.config.ts"
+import type { E2EConfig } from 'e2e';
+import { web } from '@e2e-dev/web';
+import { testmuBrowsers } from '@e2e-dev/testmu/web';
+
+export default {
+  targets: [
+    {
+      name: 'testmu-web',
+      engine: web({ browser: testmuBrowsers({ platform: 'Windows 11' }), viewport: null }),
+      app: { url: 'https://staging.example.com' },
+    },
+  ],
+} satisfies E2EConfig;
+```
+
+A session starts when its CDP websocket opens and ends when the engine
+closes it, so the provider only builds the CDP URL from the options and
+`LT_USERNAME`/`LT_ACCESS_KEY`, and calls no API.
+
+## Credentials
+
+Both providers read `LT_USERNAME` and `LT_ACCESS_KEY` from the run's
+environment. To get them, [sign up for TestMu AI](https://accounts.lambdatest.com/register)
+or log in to your account, then copy your username and access key from
+**Account Settings → Password & Security → Username and Access Key**
+([accounts.lambdatest.com/security/username-accesskey](https://accounts.lambdatest.com/security/username-accesskey)).
+
+Full documentation lives at [e2e.tester.army/docs/integrations/testmu](https://e2e.tester.army/docs/integrations/testmu)
+(devices) and [e2e.tester.army/docs/integrations/testmu-browsers](https://e2e.tester.army/docs/integrations/testmu-browsers)
+(browsers).
 
 ## License
 

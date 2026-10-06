@@ -132,6 +132,10 @@ package, not the upload name.
 Set `LT_USERNAME` and `LT_ACCESS_KEY` to your TestMu AI username and access
 key in the environment `e2e run` starts in, such as CI secrets. Without
 either, the lease fails before anything starts, naming the missing one.
+To get them, [sign up for TestMu AI](https://accounts.lambdatest.com/register)
+or log in to your account, then copy your username and access key from
+**Account Settings → Password & Security → Username and Access Key**
+([accounts.lambdatest.com/security/username-accesskey](https://accounts.lambdatest.com/security/username-accesskey)).
 
 agent-device's `testmu` runtime reads the credentials from the environment
 of the daemon that drives the sessions. The provider starts that daemon from
