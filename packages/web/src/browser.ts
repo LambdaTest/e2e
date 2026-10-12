@@ -39,7 +39,7 @@ import { classifyInputError } from './actions.ts';
 import type { DialogHandler } from './dialogs.ts';
 import { saveDownloadsTo, saveFromBrowser, saveLocally } from './downloads.ts';
 import { isTestErrorCode, message as causeMessage, translatePwError } from './support.ts';
-import { compileEvaluation } from './evaluation.ts';
+import { compileEvaluation, pageFunctionSource } from './evaluation.ts';
 import { initScriptLabel, testInitScriptSource } from './init-scripts.ts';
 import { lowercaseNames } from './protected-app.ts';
 import { parseContinue, parseFulfill, requireNoArguments } from './route-options.ts';
@@ -322,26 +322,26 @@ export function createBrowserFixture(surface: PlaywrightSurface, context: Engine
   const browser: Omit<Browser, keyof Expectable<BrowserExpectation>> = {
     goto(url, options) {
       const resolved = context.app.resolveUrl(url);
-      return navigation(options, async (operation) => {
+      return navigation(options, (operation) => surface.navigating(async () => {
         const page = await surface.ensurePage();
         await page.goto(resolved, {
           waitUntil: options?.waitUntil ?? 'load',
           timeout: operation.timeoutMs,
         });
-      });
+      }));
     },
     reload: (options) =>
-      navigation(options, async (operation) => {
+      navigation(options, (operation) => surface.navigating(async () => {
         await surface.requirePage().reload({ waitUntil: 'load', timeout: operation.timeoutMs });
-      }),
+      })),
     back: (options) =>
-      navigation(options, async (operation) => {
+      navigation(options, (operation) => surface.navigating(async () => {
         await surface.requirePage().goBack({ waitUntil: 'load', timeout: operation.timeoutMs });
-      }),
+      })),
     forward: (options) =>
-      navigation(options, async (operation) => {
+      navigation(options, (operation) => surface.navigating(async () => {
         await surface.requirePage().goForward({ waitUntil: 'load', timeout: operation.timeoutMs });
-      }),
+      })),
     url: () => currentUrl(),
     title: () => currentTitle(),
     // The same poll as `expect(browser).toHaveURL`, exposed as a wait.
@@ -355,7 +355,7 @@ export function createBrowserFixture(surface: PlaywrightSurface, context: Engine
       fn: string | ((arg?: never) => T | Promise<T>),
       arg?: JsonValue,
     ): Promise<T> {
-      const source = typeof fn === 'string' ? fn : fn.toString();
+      const source = typeof fn === 'string' ? fn : pageFunctionSource(fn);
       validateJsonValue(arg, 'evaluate argument');
       const evaluate = compileEvaluation(source, arg !== undefined);
       // JSON safety is checked above; Playwright's recursive argument type cannot expand JsonValue.

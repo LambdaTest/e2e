@@ -72,7 +72,7 @@ describe('resolveConfig', () => {
     expect(config.cleanupTimeout).toBe(30_000);
     expect(config.retries).toBe(0);
     expect(config.tests).toEqual(['tests/**/*.e2e.ts']);
-    expect(config.targets[0]!.trace).toEqual({ mode: 'on', source: 'default' });
+    expect(config.targets[0]!.trace).toEqual({ mode: 'retain-on-failure', source: 'default' });
     expect(config.targets[0]!.video).toEqual({ mode: 'off', source: 'default' });
     expect(config.reporters).toEqual(['list']);
   });
@@ -148,11 +148,11 @@ describe('resolveConfig', () => {
     ).toBe(3);
   });
 
-  it('uses CI defaults for retries, workers, trace, and video', () => {
+  it('uses CI defaults for retries and workers, and the same trace and video as locally', () => {
     const config = resolve({}, { ...BASE_ENV, CI: '1' } as NodeJS.ProcessEnv);
     expect(config.retries).toBe(1);
     expect(config.workers).toBe(1);
-    expect(config.targets[0]!.trace).toEqual({ mode: 'on-first-retry', source: 'default' });
+    expect(config.targets[0]!.trace).toEqual({ mode: 'retain-on-failure', source: 'default' });
     expect(config.targets[0]!.video).toEqual({ mode: 'off', source: 'default' });
   });
 
@@ -359,6 +359,33 @@ describe('resolveConfig', () => {
         credentials: { admin: { username: 'admin', password: 42 as never } },
       }),
     ).toThrow(/password must be a non-empty string or a provider function/);
+  });
+
+  it('rejects a credential username that is not a string, an unknown credential key, and a non-object credential', () => {
+    expect(() =>
+      resolve({
+        credentials: { admin: { username: (() => 'admin') as never, password: 'admin-pass' } },
+      }),
+    ).toThrow(
+      expect.objectContaining({
+        code: 'INVALID_CONFIG',
+        message: 'credential "admin" username must be a string, got a function; only password may be a provider function',
+      }),
+    );
+    expect(() =>
+      resolve({
+        credentials: { admin: { username: 'admin', password: 'admin-pass', usename: 'admin' } as never },
+      }),
+    ).toThrow(/unknown key "usename" in credential "admin"; a credential has username and password; did you mean "username"\?/);
+    expect(() => resolve({ credentials: { admin: null as never } })).toThrow(
+      /credential "admin" must be an object of \{ username, password \}, got null/,
+    );
+  });
+
+  it('takes a username missing from the config from E2E_USER_<NAME>_USERNAME, and rejects one missing from both', () => {
+    const credentials = { admin: { username: undefined as never, password: 'admin-pass' } };
+    expect(resolve({ credentials }, { E2E_USER_ADMIN_USERNAME: 'from-env' }).credentials.get('admin')?.username).toBe('from-env');
+    expect(() => resolve({ credentials })).toThrow(/credential "admin" has no username; set username or E2E_USER_ADMIN_USERNAME/);
   });
 
   it('rejects an empty credential password at config time, including an empty env override', () => {
@@ -907,7 +934,7 @@ describe('resolveConfig', () => {
 
   describe.each(['trace', 'video'] as const)('%s', (kind) => {
     const web = (mode: string) => ({ ...WEB, [kind]: mode }) as unknown as Target;
-    const fallback = kind === 'trace' ? 'on' : 'off';
+    const fallback = kind === 'trace' ? 'retain-on-failure' : 'off';
 
     it('defaults, and a target inherits the config mode as a run-wide one', () => {
       expect(resolveConfig({ targets: TARGETS }, { projectRoot: ROOT, env: BASE_ENV }).targets[0]![kind]).toEqual({ mode: fallback, source: 'default' });
@@ -983,7 +1010,7 @@ describe('resolveConfig', () => {
       expect(refusal({ output: '/tmp/e2e-results' })).toContain('is outside the project root');
       expect(refusal({ output: '.e2e/cache' })).toContain('is the cache directory .e2e/cache or inside it');
       expect(refusal({ output: 'store/results', cache: { dir: 'store' } })).toContain('is the cache directory store or inside it');
-      expect(refusal({ output: 'out', cache: { dir: 'out/artifacts/cache' } })).toContain('would hold cache.dir out/artifacts/cache under artifacts/');
+      expect(refusal({ output: 'out', cache: { dir: 'out/results/cache' } })).toContain('would hold cache.dir out/results/cache under results/');
       expect(refusal({ output: 'tests' })).toContain('holds tests, where the tests glob "tests/**/*.e2e.ts" finds test files');
       expect(refusal({ output: 'e2e', tests: ['e2e/smoke/**/*.e2e.ts'] })).toContain('holds e2e/smoke');
       expect(refusal({ output: 'e2e', tests: 'e2e/login.e2e.ts' })).toContain('holds e2e,');
@@ -1009,10 +1036,10 @@ describe('resolveConfig', () => {
         expect(resolveConfig({ targets: TARGETS }, { projectRoot: link, env: BASE_ENV, cli: { output: path.join(real, 'out') } }).output).toBe(
           path.join(real, 'out'),
         );
-        // A cache the run would clear with <output>/artifacts, however it is spelled.
+        // A cache the run would clear with <output>/results, however it is spelled.
         expect(() =>
-          resolveConfig({ targets: TARGETS, cache: { dir: path.join(link, '.e2e', 'artifacts', 'cache') } }, { projectRoot: real, env: BASE_ENV }),
-        ).toThrow('output ".e2e" (the default) would hold cache.dir .e2e/artifacts/cache under artifacts/');
+          resolveConfig({ targets: TARGETS, cache: { dir: path.join(link, '.e2e', 'results', 'cache') } }, { projectRoot: real, env: BASE_ENV }),
+        ).toThrow('output ".e2e" (the default) would hold cache.dir .e2e/results/cache under results/');
         expect(() =>
           resolveConfig({ targets: TARGETS }, { projectRoot: real, env: BASE_ENV, cli: { output: link } }),
         ).toThrow(`--output ${JSON.stringify(link)} is the project root`);

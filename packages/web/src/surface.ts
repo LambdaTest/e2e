@@ -9,7 +9,7 @@
 
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
-import type { Browser, BrowserContext, ElementHandle, FrameLocator, Page, Route } from 'playwright-core';
+import type { Browser, BrowserContext, ElementHandle, FrameLocator, Locator, Page, Route } from 'playwright-core';
 import {
   EngineError,
   raceAbort,
@@ -42,14 +42,16 @@ import { BrowserConnection, connectCdp, type BrowserName } from './browser-conne
 import { AttemptSession, type StorageState } from './attempt-session.ts';
 import type { CdpEndpointResolver } from './cdp-recovery.ts';
 import { LeasedBrowsers, type BrowserProvider, type LeaseDownloads } from './provider.ts';
+import { installAppLog } from './app-log.ts';
+import { TraceFeed } from './trace-feed.ts';
 import { DialogRouter } from './dialogs.ts';
 import { ensureBrowsersInstalled } from './install.ts';
 import { applyPostSteps, frameSelectors, projectExpression } from './locators.ts';
-import { ROOT_NODE_ID, toSemanticNode } from './observation.ts';
+import { contentBox, frameContentInset, placeRectInFrame, ROOT_NODE_ID, toSemanticNode } from './observation.ts';
 import { captureObservation } from './observation-capture.ts';
 import { maskOptions, secureFieldMasks } from './observe.ts';
 import { connectionAbort, withOperationDeadline, type OperationBound } from './operation-budget.ts';
-import { CLOSED_SHADOW_ROOTS_INIT_SCRIPT } from './closed-shadow.ts';
+import { CLOSED_SHADOW_ROOTS_INIT_SCRIPT, CLOSED_SHADOW_ROOTS_KEY } from './closed-shadow.ts';
 import { ConfiguredInitScripts, type WebInitScript } from './init-scripts.ts';
 import { SECURE_FIELD_SELECTOR, type RawNodeData } from './read-node.ts';
 import { readSelector, takeReadsFunction } from './read-selector.ts';
@@ -188,8 +190,7 @@ export interface WebOptions {
    * page, deterministic and agent-driven alike. Injecting headers routes
    * every request of the attempt, which turns the browser's HTTP cache off
    * and blocks service workers (a worker's requests bypass routing, so a
-   * page it controlled would reach the gate bare), and a Playwright trace
-   * records request headers.
+   * page it controlled would reach the gate bare).
    */
   readonly headers?: Readonly<Record<string, string>>;
   /**
@@ -273,6 +274,10 @@ export class PlaywrightSurface {
   private projectRoot = '';
   private headed = false;
   private artifactsDir = '';
+  /** Navigations the engine has in flight, which the app log leaves to the step that started them. */
+  private ownNavigations = 0;
+  /** What the attempt tells its trace beside the app log; absent between attempts. */
+  private trace: TraceFeed | undefined;
   private artifactCounter = 0;
   /**
    * Attempt-scoped network routes. Registered on the
@@ -441,6 +446,7 @@ export class PlaywrightSurface {
     const persistent = await this.persistentBinding(context);
     this.artifactsDir = context.artifactsDir;
     this.artifactCounter = 0;
+    this.trace = new TraceFeed(context, () => this.openPage(), () => this.session?.refs, { testIdAttribute: this.testIdAttribute, site: this.app.site });
     const routes: StoredRoute[] = [];
     const initScripts = this.configuredInitScripts.forAttempt();
     this.latch = new ErrorLatch();
@@ -467,6 +473,11 @@ export class PlaywrightSurface {
         for (const script of initScripts) await target.addInitScript(script);
         target.setDefaultTimeout(CONTEXT_DEFAULT_TIMEOUT_MS);
         target.on('dialog', (dialog) => { void dialogs.dispatch(dialog); });
+        installAppLog(target, context.appLog, {
+          navigated: context.navigation,
+          ownNavigation: () => this.ownNavigations > 0,
+          testPage: () => this.openPage(),
+        });
         await installSiteHeaders(target, this.app.site, this.headers);
         for (const stored of routes) await target.route(stored.predicate, stored.handler);
       },
@@ -506,8 +517,8 @@ export class PlaywrightSurface {
    * Releases attempt resources, the worker's shared browser process, and a
    * lease the worker acquired for itself: three independent tasks, in that
    * order, every one attempted whatever the earlier ones did, and the first
-   * failure reported once all ran. A billed browser outlives a failed trace
-   * flush otherwise.
+   * failure reported once all ran. A billed browser outlives a failed
+   * recording flush otherwise.
    */
   async dispose(context: EngineCleanupContext): Promise<void> {
     const tasks = [
@@ -569,6 +580,20 @@ export class PlaywrightSurface {
   }
 
   // --- page access shared with the browser fixture ---
+
+  /**
+   * The attempt's open page, or undefined, for a reader beside the test (the
+   * trace): unlike `requirePage`, it leaves an error a handler latched for
+   * the test's next operation to throw.
+   */
+  private openPage(): Page | undefined {
+    try {
+      const page = this.session?.current().page ?? null;
+      return page === null || page.isClosed() ? undefined : page;
+    } catch {
+      return undefined;
+    }
+  }
 
   requirePage(): Page {
     this.latch.throwPending();
@@ -638,16 +663,39 @@ export class PlaywrightSurface {
 
   /** Opens one URL the harness resolved; the attempt's page is created on first use. */
   open(url: string, operation: OperationContext): Promise<void> {
-    return this.guard(operation, 'navigation', async (currentOperation) => {
-      const page = await this.ensurePage();
-      await page.goto(url, { waitUntil: 'load', timeout: currentOperation.timeoutMs });
-    });
+    return this.acted(operation, this.guard(operation, 'navigation', (currentOperation) =>
+      this.navigating(async () => {
+        const page = await this.ensurePage();
+        await page.goto(url, { waitUntil: 'load', timeout: currentOperation.timeoutMs });
+      }),
+    ));
   }
 
   back(operation: OperationContext): Promise<void> {
-    return this.guard(operation, 'navigation', async (currentOperation) => {
-      await this.requirePage().goBack({ waitUntil: 'load', timeout: currentOperation.timeoutMs });
-    });
+    return this.acted(operation, this.guard(operation, 'navigation', (currentOperation) =>
+      this.navigating(async () => {
+        await this.requirePage().goBack({ waitUntil: 'load', timeout: currentOperation.timeoutMs });
+      }),
+    ));
+  }
+
+  /** Runs one navigation the engine itself makes, so the app log leaves it to the step that asked for it. */
+  async navigating<T>(work: () => Promise<T>): Promise<T> {
+    this.ownNavigations += 1;
+    try {
+      const result = await work();
+      this.trace?.tellEnvironment();
+      return result;
+    } finally {
+      this.ownNavigations -= 1;
+    }
+  }
+
+  /** Resolves with what an action resolved with once the trace has the screen it left (`TraceFeed.screenAfterAction`); an action that failed leaves none. */
+  private async acted<T>(operation: OperationContext, work: Promise<T>): Promise<T> {
+    const result = await work;
+    await this.trace?.screenAfterAction(operation);
+    return result;
   }
 
   /** Restarts the document while retaining this attempt's context and storage. */
@@ -684,7 +732,7 @@ export class PlaywrightSurface {
         const token = session.token();
         const refs = session.refs;
         const page = this.requirePage();
-        await this.validateFrames(expression);
+        const frame = await this.frameBox(expression);
         const projected = projectExpression(page, expression, this.testIdAttribute);
         const { displayValue, name, steps } = projected;
         // Every match is read by the `e2e-read` selector engine in the task that finds it, so a
@@ -765,7 +813,7 @@ export class PlaywrightSurface {
           const id = refs.storeLocated(
             pinned === undefined ? { kind: 'locator', locator } : { kind: 'element', element: pinned },
           );
-          return toSemanticNode({ id, revision: '' }, raw);
+          return inFrame(toSemanticNode({ id, revision: '' }, raw), frame);
         });
       },
       staleOr,
@@ -779,7 +827,7 @@ export class PlaywrightSurface {
    * on the root acts on the document element the root stands for.
    */
   perform(ref: NodeRef, action: LocatorAction, operation: OperationContext): Promise<void> {
-    return this.guard(
+    return this.acted(operation, this.guard(
       operation,
       action.kind,
       (currentOperation) => {
@@ -788,20 +836,20 @@ export class PlaywrightSurface {
           this.requireSession().requireObservation();
           return performViewportSwipe(page, action.direction, action.momentum ?? 'none');
         }
-        return dispatchLocatorAction(this.requireSession().refs.lookup(ref), action, currentOperation.timeoutMs, (other) =>
+        return dispatchLocatorAction(this.requireSession().refs.lookup(ref), action, currentOperation, (other) =>
           this.requireSession().refs.lookup(other),
         );
       },
       (cause) => classifyActionError(cause, action),
-    );
+    ));
   }
 
   /** One pointer action at a viewport point in CSS pixels, with nothing resolved behind it; see `dispatchPointerAction`. */
   performAt(point: ViewportPoint, action: PointerAction, operation: OperationContext): Promise<void> {
-    return this.guard(operation, `${action.kind} at point`, (currentOperation) => {
+    return this.acted(operation, this.guard(operation, `${action.kind} at point`, (currentOperation) => {
       this.requireSession().requireObservation();
       return dispatchPointerAction(this.requirePage(), point, action, currentOperation.signal);
-    }, classifyInputError);
+    }, classifyInputError));
   }
 
   /**
@@ -812,7 +860,7 @@ export class PlaywrightSurface {
    * scoped by the browser to the whole editing host, so it is opt-in.
    */
   typeText(text: string, options: { readonly replace: boolean }, operation: OperationContext): Promise<void> {
-    return this.guard(operation, 'keyboard.type', async (currentOperation) => {
+    return this.acted(operation, this.guard(operation, 'keyboard.type', async (currentOperation) => {
       const session = this.requireSession();
       session.requireObservation();
       const token = session.token();
@@ -831,15 +879,15 @@ export class PlaywrightSurface {
         checkpoint();
       }
       await page.keyboard.type(text);
-    }, classifyInputError);
+    }, classifyInputError));
   }
 
   /** Sends one key to whatever holds focus, in the contract's key grammar Playwright shares. */
   pressKey(key: string, operation: OperationContext): Promise<void> {
-    return this.guard(operation, 'keyboard.press', () => {
+    return this.acted(operation, this.guard(operation, 'keyboard.press', () => {
       this.requireSession().requireObservation();
       return this.requirePage().keyboard.press(key);
-    }, classifyInputError);
+    }, classifyInputError));
   }
 
   /**
@@ -854,18 +902,26 @@ export class PlaywrightSurface {
     const editable = await Promise.all(
       page.frames().map((frame) =>
         frame
-          .evaluate(() => {
-            const active = document.activeElement;
+          .evaluate((key) => {
+            const recorded: unknown = Reflect.get(globalThis, Symbol.for(key));
+            let active = document.activeElement;
+            while (active !== null) {
+              const root: ShadowRoot | undefined | null = active.shadowRoot ?? (recorded instanceof WeakMap ? recorded.get(active) : undefined);
+              const leaf = root?.activeElement;
+              if (leaf === undefined || leaf === null) break;
+              active = leaf;
+            }
             if (active === null || active === document.body || active === document.documentElement) return false;
             if (active instanceof HTMLInputElement) {
               return !active.disabled && !active.readOnly && !['button', 'submit', 'reset', 'checkbox', 'radio', 'file', 'image', 'range', 'color'].includes(active.type);
             }
             if (active instanceof HTMLTextAreaElement) return !active.disabled && !active.readOnly;
-            if (active instanceof HTMLSelectElement || active instanceof HTMLButtonElement || active instanceof HTMLAnchorElement) {
+            if (active instanceof HTMLSelectElement || active instanceof HTMLButtonElement || active instanceof HTMLAnchorElement ||
+                active instanceof HTMLIFrameElement || active instanceof HTMLFrameElement) {
               return false;
             }
             return true;
-          })
+          }, CLOSED_SHADOW_ROOTS_KEY)
           .catch(() => false),
       ),
     );
@@ -882,10 +938,14 @@ export class PlaywrightSurface {
    * Checks that every frame selector along the expression matches exactly one
    * element, each counted inside the frame before it, the way `project` walks
    * the same chain; a frame-scoped `count` is 0 until that frame's document
-   * has loaded, which is what makes `FRAME_NOT_FOUND` worth retrying.
+   * has loaded, which is what makes `FRAME_NOT_FOUND` worth retrying. Returns
+   * the innermost frame's content box in the top-level viewport, where its
+   * document's viewport starts: undefined for an expression in the main
+   * document, null for a frame with no box.
    */
-  private async validateFrames(expression: LocatorExpression): Promise<void> {
+  private async frameBox(expression: LocatorExpression): Promise<Rect | null | undefined> {
     let scope: Page | FrameLocator = this.requirePage();
+    let element: Locator | undefined;
     for (const selector of frameSelectors(expression)) {
       let count: number;
       try {
@@ -903,7 +963,15 @@ export class PlaywrightSurface {
           retryable: false,
         });
       }
+      element = scope.locator(selector);
       scope = scope.frameLocator(selector);
+    }
+    if (element === undefined) return undefined;
+    try {
+      const border = await element.boundingBox();
+      return border === null ? null : contentBox(border, await element.evaluate(frameContentInset));
+    } catch (cause) {
+      throw translatePwError(cause, 'frame resolution');
     }
   }
 
@@ -938,17 +1006,7 @@ export class PlaywrightSurface {
     });
   }
 
-  /** Starts tracing the current attempt. */
-  startTrace(operation: OperationContext): Promise<void> {
-    return this.guard(operation, 'trace', () => this.requireSession().startTrace());
-  }
-
-  /** Returns every trace segment finalized by the current attempt. */
-  stopTrace(operation: OperationContext): Promise<string | readonly string[]> {
-    return this.requireSession().collectTrace(operation);
-  }
-
-  /** Starts the attempt's video before a trace chooses its screencast dimensions. */
+  /** Starts the attempt's video. */
   startVideo(operation: OperationContext): Promise<void> {
     return this.guard(operation, 'video', (current) => this.requireSession().startVideo(current.signal));
   }
@@ -1039,4 +1097,18 @@ export class PlaywrightSurface {
       throw cause;
     }
   }
+}
+
+type Rect = NonNullable<SemanticNode['rect']>;
+
+/**
+ * A located node in the top-level viewport's space, as the observation tree
+ * reports it: its box shifted by the frame's and clipped to it, and dropped
+ * when the frame has no box or the node lies outside it.
+ */
+function inFrame(node: SemanticNode, frame: Rect | null | undefined): SemanticNode {
+  if (frame === undefined || node.rect === undefined) return node;
+  const { rect, ...rest } = node;
+  const placed = frame === null ? undefined : placeRectInFrame(rect, frame);
+  return placed === undefined ? rest : { ...rest, rect: placed };
 }

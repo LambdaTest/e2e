@@ -6,15 +6,19 @@ import { resultId } from '../../src/internal/ids.ts';
 import type { Report1Document } from '../../src/report/build.ts';
 import { carryForward, lastFailedIds, readLastRun, reportArtifactPaths } from '../../src/run/last-run.ts';
 
-let dir: string;
+/** Temp roots this file creates. A list, not one `dir`: a case may make several, and
+ * `reportFile` is called more than once inside a case, so a single variable drops the
+ * earlier roots on the floor. */
+const tempRoots: string[] = [];
 
 afterEach(() => {
-  if (dir !== undefined) rmSync(dir, { recursive: true, force: true });
+  for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 /** Writes `content` as the report file of a fresh project directory and returns its path. */
 function reportFile(content: string): string {
-  dir = mkdtempSync(path.join(os.tmpdir(), 'e2e-last-run-'));
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'e2e-last-run-'));
+  tempRoots.push(dir);
   const file = path.join(dir, 'report.json');
   writeFileSync(file, content, 'utf8');
   return file;
@@ -134,7 +138,8 @@ describe('readLastRun and lastFailedIds', () => {
   });
 
   it('is NO_LAST_RUN when no report exists, with the path and the way out', async () => {
-    dir = mkdtempSync(path.join(os.tmpdir(), 'e2e-last-run-'));
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'e2e-last-run-'));
+    tempRoots.push(dir);
     const missing = path.join(dir, 'report.json');
     await expect(readLastRun(missing)).rejects.toMatchObject({
       code: 'NO_LAST_RUN',
@@ -275,7 +280,7 @@ describe('carryForward', () => {
   });
 
   it("carries a serial member's group, where its attempts live", () => {
-    const group = { id: 'group', attempts: [{ artifacts: [{ path: 'web/group/attempt-0/trace.zip' }] }] };
+    const group = { id: 'group', attempts: [{ artifacts: [{ path: 'web/group/attempt-0/video.webm' }] }] };
     const before = document([failed('member', { serialGroupId: 'group', attempts: [] }), failed('other')], [], { serialGroups: [group] });
     const carried = carry(before, document([leftOut('member'), passed('other')]));
     expect(carriedIds(carried)).toEqual(['member']);
@@ -283,10 +288,10 @@ describe('carryForward', () => {
   });
 
   it('names every artifact file a report points at, its carried ones included', () => {
-    const group = { id: 'group', attempts: [{ artifacts: [{ path: 'web/group/attempt-0/trace.zip' }, { url: 'https://hosted.example/v.mp4' }] }] };
+    const group = { id: 'group', attempts: [{ artifacts: [{ path: 'web/group/attempt-0/video.webm' }, { url: 'https://hosted.example/v.mp4' }] }] };
     const carried = { results: [failed('old')], serialGroups: [group] };
     const paths = reportArtifactPaths(document([failed('new'), passed('fine')], [], { carried }));
-    expect([...paths].toSorted()).toEqual(['web/group/attempt-0/trace.zip', 'web/new/attempt-0/failure.png', 'web/old/attempt-0/failure.png']);
+    expect([...paths].toSorted()).toEqual(['web/group/attempt-0/video.webm', 'web/new/attempt-0/failure.png', 'web/old/attempt-0/failure.png']);
   });
 
   it('reads the tests a report carries back as ones to run again', async () => {
