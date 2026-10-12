@@ -1,8 +1,8 @@
 /**
  * The TestMu AI credentials a run authenticates with: `LT_USERNAME` and
- * `LT_ACCESS_KEY` from the run's environment. agent-device's `testmu`
- * runtime reads them from the environment of the daemon that drives the
- * sessions, not from a request.
+ * `LT_ACCESS_KEY` from the run's environment. agent-device's
+ * `@agent-device/testmu` plugin reads them from the environment of the
+ * daemon that drives the sessions, not from a request.
  */
 
 const LT_USERNAME = 'LT_USERNAME';

@@ -9,8 +9,9 @@ description: Run mobile targets on TestMu AI (formerly LambdaTest) Android emula
 [TestMu AI](https://www.lambdatest.com) (formerly LambdaTest). The run gets
 hosted Android emulators, iOS simulators, or real devices, leased when it
 starts and released when it ends. agent-device reaches them through its
-`testmu` cloud provider, which drives each session over TestMu AI's Appium
-hub. Tests, config, and CI stay the same.
+[`@agent-device/testmu`](https://oss.callstack.com/agent-device/docs/testmu)
+plugin, which drives each session over TestMu AI's Appium hub. Tests,
+config, and CI stay the same.
 
 <Tip>
 No Mac, Xcode, or Android SDK on the machine that runs e2e.
@@ -18,58 +19,57 @@ No Mac, Xcode, or Android SDK on the machine that runs e2e.
 
 ## Setup
 
-The provider runs on agent-device's `testmu` provider, so install
-`agent-device` beside the package, at a release that includes it:
+Install the package beside `agent-device`, at the same version as
+`@e2e-dev/mobile`, currently `0.21.25`. The provider starts the daemon from
+your copy and the engine's workers send commands through theirs, so both
+must be the same agent-device:
 
 <CodeGroup>
 ```bash npm
-npm install --save-dev @e2e-dev/testmu agent-device@<version>
+npm install --save-dev @e2e-dev/testmu agent-device@0.21.25
 ```
 
 ```bash pnpm
-pnpm add -D @e2e-dev/testmu agent-device@<version>
+pnpm add -D @e2e-dev/testmu agent-device@0.21.25
 ```
 
 ```bash bun
-bun add -d @e2e-dev/testmu agent-device@<version>
+bun add -d @e2e-dev/testmu agent-device@0.21.25
 ```
 </CodeGroup>
 
-`<version>` is an agent-device release that includes the `testmu` provider.
-No published release does yet: until one does, install agent-device from a
-build that includes it. The package's `agent-device` peer range excludes
-only the releases known to lack the provider, so it cannot tell you whether
-a newer one has it.
+The package's `agent-device` peer range starts at 0.21.25, the first
+release that loads the plugin and keeps a lease through session close.
 
-`@e2e-dev/mobile` pins its own agent-device. The provider starts the daemon
-from your copy and the engine's workers send commands through theirs, so
-both must be the same agent-device. Override the engine's pin:
+agent-device talks to TestMu AI through the `@agent-device/testmu` plugin.
+Add it once on every machine that runs e2e, CI runners included:
 
 <CodeGroup>
-```json npm
-{
-  "overrides": {
-    "agent-device": "$agent-device"
-  }
-}
+```bash npm
+npx agent-device plugins add @agent-device/testmu
 ```
 
-```yaml pnpm
-# pnpm-workspace.yaml
-overrides:
-  agent-device: $agent-device
+```bash pnpm
+pnpm exec agent-device plugins add @agent-device/testmu
 ```
 
-```json bun
-{
-  "overrides": {
-    "agent-device": "<version>"
-  }
-}
+```bash bun
+bunx agent-device plugins add @agent-device/testmu
 ```
 </CodeGroup>
 
-For npm and bun the `overrides` field goes in `package.json`.
+agent-device installs the plugin with npm under `~/.agent-device`, or under
+`AGENT_DEVICE_HOME` when that is set, and a daemon loads the plugins there
+when it starts. The provider starts a new daemon for every run, so the next
+run uses the plugin. A daemon you started yourself before adding or
+updating the plugin does not: close its sessions and run
+`agent-device daemon stop`. `agent-device plugins update @agent-device/testmu`
+updates the plugin.
+
+Without the plugin, agent-device grants the lease without starting a TestMu
+AI session, and the first command on the device fails with
+`DEVICE_NOT_FOUND`, `No device named <device>`. Run
+`agent-device plugins list` to check that `@agent-device/testmu` is there.
 
 ```ts title="e2e.config.ts"
 import type { E2EConfig } from 'e2e';
@@ -137,7 +137,7 @@ or log in to your account, then copy your username and access key from
 **Account Settings → Password & Security → Username and Access Key**
 ([accounts.lambdatest.com/security/username-accesskey](https://accounts.lambdatest.com/security/username-accesskey)).
 
-agent-device's `testmu` runtime reads the credentials from the environment
+The `@agent-device/testmu` plugin reads the credentials from the environment
 of the daemon that drives the sessions. The provider starts that daemon from
 the runner process, and agent-device starts a daemon with the process's own
 environment and takes no other, so while the provider calls the daemon (to
@@ -180,8 +180,7 @@ device: testmu({ device: 'iPhone 16', osVersion: '18.0', app: './build/MyApp.zip
 `deviceType: 'real'` leases a real device instead of an emulator or
 simulator. Real and virtual devices have separate catalogs, so check
 `device` and `osVersion` against the real-device one, and give a real iOS
-device a signed `.ipa`. Real devices need an agent-device release whose
-`testmu` provider supports them.
+device a signed `.ipa`.
 
 ## Options
 
@@ -302,6 +301,10 @@ can link another run's video; give such runs their own `build`, or leave
   never its own. A directory without the marker is never removed, so a
   `stateDir` shared with other tools is safe, and a failure to remove one
   does not fail the lease.
+- Allocates each lease to outlast the worker's agent-device session, so
+  the engine closing that session when it retires a worker does not end
+  the TestMu AI session. A daemon that does not keep the lease fails it,
+  and the provider releases it.
 - Keeps each lease alive while the run holds it. The provider allocates
   with agent-device's longest lease window, 10 minutes, and heartbeats the
   lease every 2 minutes once it is granted, so a session that takes up to

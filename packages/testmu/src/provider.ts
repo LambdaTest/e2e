@@ -1,8 +1,8 @@
 /**
  * TestMu AI's hosted Android emulators, iOS simulators, and real devices as a
- * `DeviceProvider` for the mobile engine, through agent-device's `testmu`
- * cloud provider: the provider allocates agent-device leases, and the daemon
- * holding them runs each session over TestMu AI's Appium hub.
+ * `DeviceProvider` for the mobile engine, through agent-device's
+ * `@agent-device/testmu` plugin: the provider allocates agent-device leases,
+ * and the daemon holding them runs each session over TestMu AI's Appium hub.
  */
 
 import { lstat, mkdir, readdir, rm, utimes, writeFile } from 'node:fs/promises';
@@ -158,7 +158,7 @@ interface LeaseHandle {
  * An attempt that records video links TestMu AI's recording of the whole
  * session, found by the lease's build and session name, and starting when
  * the session did. It authenticates with `LT_USERNAME` and `LT_ACCESS_KEY` from the run's
- * environment, and needs an agent-device with the `testmu` provider.
+ * environment, and needs the `@agent-device/testmu` plugin added to agent-device.
  */
 export function testmu(options: TestmuOptions): DeviceProvider {
   rejectUnknownKeys('testmu()', options, OPTION_KEYS);

@@ -342,8 +342,10 @@ export default {
   AI (formerly LambdaTest) emulators, simulators, or real devices
   (`deviceType: 'real'`); `device` and `osVersion` match its catalog
   exactly, TestMu AI installs `app` (omit `app.appPath`), it reads
-  `LT_USERNAME` and `LT_ACCESS_KEY`, and needs an agent-device with the
-  `testmu` provider shared with `@e2e-dev/mobile` (override its pin).
+  `LT_USERNAME` and `LT_ACCESS_KEY`, and needs `agent-device` at
+  `@e2e-dev/mobile`'s version with `agent-device plugins add
+  @agent-device/testmu` run once per machine (a daemon already running
+  loads it only after `agent-device daemon stop`).
   An attempt's video links TestMu AI's recording of the whole session.
 - Only a control that appeared or moved with the previous action waits out
   `transition` (default 500 ms); agent actions settle `settle` ms (default
