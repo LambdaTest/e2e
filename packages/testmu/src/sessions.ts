@@ -1,6 +1,6 @@
 /**
  * TestMu AI's mobile automation sessions API over `fetch`, the one
- * agent-device's `testmu` provider reads session artifacts from: finds a
+ * agent-device's `@agent-device/testmu` plugin reads session artifacts from: finds a
  * session by its build and name, with its start time, and reads the URL of
  * its video.
  */

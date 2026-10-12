@@ -1,8 +1,8 @@
 /**
  * TestMu AI's hosted Android emulators, iOS simulators, and real devices as a
- * `DeviceProvider` for the mobile engine, through agent-device's `testmu`
- * cloud provider: the provider allocates agent-device leases, and the daemon
- * holding them runs each session over TestMu AI's Appium hub.
+ * `DeviceProvider` for the mobile engine, through agent-device's
+ * `@agent-device/testmu` plugin: the provider allocates agent-device leases,
+ * and the daemon holding them runs each session over TestMu AI's Appium hub.
  */
 
 import { lstat, mkdir, readdir, rm, utimes, writeFile } from 'node:fs/promises';
@@ -42,6 +42,9 @@ const DEFAULT_PROJECT = 'e2e';
  * completes; the heartbeat keeps it alive after that.
  */
 const LEASE_TTL_MS = 10 * 60_000;
+
+/** The first agent-device release that loads the `@agent-device/testmu` plugin and keeps a lease through session close. */
+const MIN_AGENT_DEVICE = '0.21.25';
 
 /** How often the runner heartbeats each lease it holds, well inside `LEASE_TTL_MS`. */
 const HEARTBEAT_INTERVAL_MS = 2 * 60_000;
@@ -155,7 +158,7 @@ interface LeaseHandle {
  * An attempt that records video links TestMu AI's recording of the whole
  * session, found by the lease's build and session name, and starting when
  * the session did. It authenticates with `LT_USERNAME` and `LT_ACCESS_KEY` from the run's
- * environment, and needs an agent-device with the `testmu` provider.
+ * environment, and needs the `@agent-device/testmu` plugin added to agent-device.
  */
 export function testmu(options: TestmuOptions): DeviceProvider {
   rejectUnknownKeys('testmu()', options, OPTION_KEYS);
@@ -234,6 +237,8 @@ export function testmu(options: TestmuOptions): DeviceProvider {
           leaseBackend,
           leaseProvider: PROVIDER,
           ttlMs: LEASE_TTL_MS,
+          // The engine closes a worker's session when it retires the worker; without this, closing it ends the TestMu AI session mid-run.
+          retainOnClose: true,
           ...selectors,
         }),
       );
@@ -241,6 +246,9 @@ export function testmu(options: TestmuOptions): DeviceProvider {
       heartbeats.set(scope.leaseId, keepAlive({ stateDir, scope, credentials }, request.log));
       try {
         if (request.signal.aborted) throw new Error('cancelled');
+        if (granted.retainOnClose !== true) {
+          throw new Error(`agent-device did not keep the lease through session close, so the session would end when a worker retires; use agent-device ${MIN_AGENT_DEVICE} or later`);
+        }
         request.log(`lease ${scope.leaseId}: ${device}, ${request.platform} ${osVersion} (${deviceType}); session ${selectors.providerSessionName} started`);
         // The worker's client is created with these fields: the scope picks the lease, and the selectors match the session it holds.
         return { id: scope.leaseId, client: { stateDir, ...scope, ...selectors } };

@@ -30,7 +30,9 @@ describe('element table', () => {
     ]);
     expect(space.targets.get('tap')).toBeUndefined();
     expect([...(space.targets.get('check')?.keys() ?? [])]).toEqual(['1', '2', '3']);
-    expect(space.elements[0]).toMatchObject({ checked: false, operations: ['check'] });
+    expect(space.elements[0]).toMatchObject({ checked: false });
+    expect(space.elements[0]?.operations).toContain('check');
+    expect(space.elements[0]?.operations).not.toContain('tap');
   });
   it('never offers check on a checked radio, which would uncheck it', () => {
     const space = spaceFor([
@@ -50,7 +52,9 @@ describe('element table', () => {
     expect(space.targets.get('tap')).toBeUndefined();
     expect(space.targets.get('type')).toBeUndefined();
     expect([...(space.targets.get('select')?.keys() ?? [])]).toEqual(['1:0', '1:1']);
-    expect(space.elements[0]).toMatchObject({ operations: ['select'] });
+    expect(space.elements[0]?.operations).toContain('select');
+    expect(space.elements[0]?.operations).not.toContain('tap');
+    expect(space.elements[0]?.operations).not.toContain('double_tap');
   });
   it('skips hidden and disabled options', () => {
     const space = spaceFor([{ id: 's', role: 'combobox', name: 'Size', children: [
@@ -86,9 +90,76 @@ describe('element table', () => {
       { id: 'b', role: 'button', name: 'Off', states: { disabled: true } },
       { id: 'c', role: 'heading', name: 'Todos' },
     ]);
-    expect(space.elements).toEqual([]);
-    expect(space.targets.size).toBe(0);
+    // The heading is no control; it stays on the page text and takes only pointer operations.
+    expect(space.elements.map((element) => [element.label, [...element.operations].toSorted()])).toEqual([['Todos', ['hover', 'secondary_tap']]]);
+    expect(space.targets.get('tap')).toBeUndefined();
     expect(space.pageText).toBe('Todos');
+  });
+  it('offers pointer operations on labeled passive nodes and drag only with a drop target', () => {
+    const space = spaceFor([
+      { id: 'menu', text: 'Card actions' },
+      { id: 'list', role: 'list', name: 'Todo column', children: [{ id: 'card', role: 'listitem', name: 'Design review' }] },
+      { id: 'done', role: 'region', name: 'Done column' },
+      { id: 'label', text: '' },
+    ]);
+    expect(space.elements.map((element) => element.label)).toEqual(['Card actions', 'Todo column', 'Design review', 'Done column']);
+    expect([...(space.targets.get('hover')?.keys() ?? [])]).toEqual(['1', '2', '3', '4']);
+    expect([...(space.targets.get('secondary_tap')?.keys() ?? [])]).toEqual(['1', '2', '3', '4']);
+    expect([...(space.targets.get('drag')?.keys() ?? [])]).toEqual(['1', '2', '3', '4']);
+    expect([...space.destinations.entries()].map(([key, destination]) => [key, destination.label])).toEqual([['2', 'Todo column'], ['3', 'Design review'], ['4', 'Done column']]);
+    expect(space.pageText).toBe('Card actions\nTodo column\nDesign review\nDone column');
+    const noDrop = spaceFor([{ id: 'menu', text: 'Card actions' }]);
+    expect(noDrop.targets.get('drag')).toBeUndefined();
+    expect(noDrop.elements[0]?.operations).not.toContain('drag');
+  });
+  it('offers scroll_to only on nodes outside the viewport', () => {
+    const space = spaceFor([
+      { id: 'in', role: 'heading', name: 'Top', rect: { x: 0, y: 10, width: 100, height: 20 } },
+      { id: 'out', role: 'paragraph', name: 'Footnote', rect: { x: 0, y: 5000, width: 100, height: 20 } },
+    ]);
+    expect([...(space.targets.get('scroll_to')?.keys() ?? [])]).toEqual(['2']);
+  });
+  it('offers upload on a file input with a text model, never tap', () => {
+    const space = spaceFor([{ id: 'f', role: 'button', name: 'Attachments', attributes: { type: 'file' } }]);
+    expect([...(space.targets.get('upload')?.keys() ?? [])]).toEqual(['1']);
+    expect(space.targets.get('tap')).toBeUndefined();
+    expect(space.targets.get('double_tap')).toBeUndefined();
+    const fixture = context();
+    const noText = actionSpace(fixture.ctx, { path: '/form', viewport: { width: 800, height: 600 }, tree: tree([{ id: 'f', role: 'button', name: 'Attachments', attributes: { type: 'file' } }]) }, false);
+    expect(noText.targets.get('upload')).toBeUndefined();
+  });
+  it('offers tap_at only with pixels, a step that locates, and the tapAt verb', () => {
+    const fixture = context();
+    const pixels = { data: new Uint8Array(0), mediaType: 'image/png' as const, width: 800, height: 600, scale: 1, maskedRegionCount: 0 };
+    const space = actionSpace(fixture.ctx, { path: '/', viewport: { width: 800, height: 600 }, tree: tree([{ id: 'a', role: 'button', name: 'Add' }]), pixels, locates: true }, true);
+    expect(space.tapAt).toBe(true);
+    expect(space.operation('tap_at')).toBe('tap_at');
+    expect(space.targets.get('tap_at')).toBeUndefined();
+    const noPixels = spaceFor([{ id: 'a', role: 'button', name: 'Add' }]);
+    expect(noPixels.tapAt).toBe(false);
+    expect(noPixels.operation('tap_at')).toBeUndefined();
+    const noLocate = actionSpace(fixture.ctx, { path: '/', viewport: { width: 800, height: 600 }, tree: tree([]), pixels }, true);
+    expect(noLocate.tapAt).toBe(false);
+    const noVerb = actionSpace(context({ verbs: ['tap'] }).ctx, { path: '/', viewport: { width: 800, height: 600 }, tree: tree([]), pixels, locates: true }, true);
+    expect(noVerb.tapAt).toBe(false);
+  });
+  it('types the operation and control an answer names', () => {
+    const space = spaceFor([{ id: 'a', role: 'button', name: 'Add' }]);
+    expect(space.operation('tap')).toBe('tap');
+    expect(space.operation('upload')).toBeUndefined();
+    expect(space.control('back')).toBe('back');
+    expect(space.control('tap')).toBeUndefined();
+  });
+  it('never offers drag when the only droppable node is the root or fell past the cap', () => {
+    const fixture = context();
+    const root = actionSpace(fixture.ctx, { path: '/', viewport: { width: 800, height: 600 }, tree: { id: 'root', role: 'region', name: 'Main', children: [{ id: 'go', role: 'button', name: 'Go' }] } }, true);
+    expect(root.targets.get('drag')).toBeUndefined();
+    expect(root.elements[0]?.operations).not.toContain('drag');
+    const children = Array.from({ length: 256 }, (_, index) => ({ id: `b${index}`, role: 'button', name: `Button ${index}`, rect: { x: 0, y: 10, width: 50, height: 20 } }));
+    const capped = spaceFor([...children, { id: 'done', role: 'region', name: 'Done column' }]);
+    expect(capped.elements).toHaveLength(255);
+    expect(capped.destinations.size).toBe(0);
+    expect(capped.targets.get('drag')).toBeUndefined();
   });
   it('uses the placeholder as the label when there is no name', () => {
     const space = spaceFor([{ id: 'q', role: 'searchbox', attributes: { placeholder: 'Search todos' } }]);
@@ -132,6 +203,20 @@ describe('element table', () => {
     expect([...full.controls.keys()].toSorted()).toEqual(['back', 'scroll_down', 'scroll_up']);
     const none = spaceFor([{ id: 'a', role: 'button', name: 'Add' }], ['tap']);
     expect(none.controls.size).toBe(0);
+  });
+  it('offers dismiss_keyboard only while the tree lists a keyboard', () => {
+    // An iOS number pad lists its keys with no keyboard node above them.
+    const numberPad: ExecutorNode[] = [
+      { id: 'reps', role: 'textbox', name: 'Reps', value: '8' },
+      { id: 'pad', role: 'other', children: [{ id: 'k1', role: 'key', name: '1' }, { id: 'k2', role: 'key', name: 'Delete' }] },
+    ];
+    expect(spaceFor(numberPad).controls.has('dismiss_keyboard')).toBe(true);
+    expect(spaceFor([{ id: 'kb', role: 'keyboard' }]).controls.has('dismiss_keyboard')).toBe(true);
+    expect(spaceFor([{ id: 'a', role: 'button', name: 'Add' }]).controls.has('dismiss_keyboard')).toBe(false);
+    expect(spaceFor([{ id: 'kb', role: 'keyboard', states: { hidden: true } }]).controls.has('dismiss_keyboard')).toBe(false);
+    const hiddenPad: ExecutorNode = { id: 'pad', role: 'other', states: { hidden: true }, children: [{ id: 'k1', role: 'key', name: '1' }] };
+    expect(spaceFor([hiddenPad]).controls.has('dismiss_keyboard')).toBe(false);
+    expect(spaceFor(numberPad, ['tap', 'type', 'scroll']).controls.has('dismiss_keyboard')).toBe(false);
   });
 });
 describe('fingerprint', () => {

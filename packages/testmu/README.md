@@ -7,16 +7,19 @@ TestMu AI's hosted Android emulators, iOS simulators, and real devices.
 ## Install
 
 ```bash
-npm install --save-dev @e2e-dev/testmu agent-device@<version>
+npm install --save-dev @e2e-dev/testmu agent-device@0.21.25
+npx agent-device plugins add @agent-device/testmu
 ```
 
-The provider drives TestMu AI through agent-device's `testmu` cloud
-provider, so the project needs an agent-device that includes it, and
-`@e2e-dev/mobile` must use that same agent-device: override its pin (npm and
-bun `overrides`, pnpm `overrides` in `pnpm-workspace.yaml`). No published
-agent-device release includes the `testmu` provider yet; `<version>` is the
-first one that does. The peer range only excludes the releases known to lack
-it.
+Install the same `agent-device` version as `@e2e-dev/mobile`, currently
+`0.21.25`: the provider starts the daemon from your copy and the engine's
+workers send commands through theirs. agent-device reaches TestMu AI
+through the [`@agent-device/testmu`](https://oss.callstack.com/agent-device/docs/testmu)
+plugin; add it on every machine that runs e2e, CI runners included. Each
+run starts its own daemon, which loads the plugin; a daemon you started
+before adding it needs `agent-device daemon stop` first. Without the
+plugin, the lease is granted but no session starts, and the first command
+fails with `DEVICE_NOT_FOUND`.
 
 ## Usage
 

@@ -12,6 +12,7 @@ import { isRecordingMode, legacyTraceSpelling, RECORDING_MODES, type RecordingKi
 import { BUILTIN_REPORTER_LIST, BUILTIN_REPORTERS, isBuiltinReporter } from '../report/builtin.ts';
 import { isStepExecutor } from '../agent/executor.ts';
 import { compileGlob, compileGlobList, literalPrefix } from '../internal/globs.ts';
+import { isRecord } from './command.ts';
 import { boundedInt, describeValue, positiveInt } from './validate.ts';
 import type {
   ArtifactStore,
@@ -85,6 +86,8 @@ export interface ResolvedConfig {
   /** Every configured agent, `default` included, by name. */
   readonly agents: ReadonlyMap<string, ResolvedAgentConfig>;
   readonly cache: ResolvedCacheConfig;
+  /** `--update-snapshots`: `toHaveScreenshot` rewrites a stored screenshot that differs. */
+  readonly updateSnapshots: boolean;
   readonly limits: ResolvedLimits;
   readonly credentials: ReadonlyMap<string, ResolvedCredential>;
   /** The `config.secrets` entries by name: what `secrets.get()` and an engine option take. */
@@ -135,6 +138,8 @@ export interface CliOverrides {
   cache?: CacheMode;
   /** `--strict-cache`: turns `cache.strict` on for the run. */
   cacheStrict?: boolean;
+  /** `--update-snapshots`: `toHaveScreenshot` rewrites a stored screenshot that differs. */
+  updateSnapshots?: boolean;
   /** `--output <dir>`: the results directory for this run, over the config's `output`. */
   output?: string;
   /** `--trace [mode]`: which attempts record a trace, over the config's and every target's `trace`. */
@@ -244,7 +249,7 @@ export function resolveConfig(
     }
   }
 
-  const recordings = runRecordings(raw, cli, ci);
+  const recordings = runRecordings(raw, cli);
   const targets = resolveTargets(raw.targets, options.projectRoot, (target, where) => ({
     trace: targetRecording(recordings.trace, target.trace, `${where} trace`, 'trace'),
     video: targetRecording(recordings.video, target.video, `${where} video`, 'video'),
@@ -308,6 +313,7 @@ export function resolveConfig(
     agent,
     agents,
     cache,
+    updateSnapshots: cli.updateSnapshots === true,
     limits,
     credentials,
     secrets,
@@ -409,7 +415,7 @@ function resolveCacheConfig(
 }
 
 /** The directories under the output a run clears or owns, which nothing else may live in. */
-const OUTPUT_OWNED_DIRS = ['artifacts', 'sessions', 'videos'] as const;
+const OUTPUT_OWNED_DIRS = ['results', 'sessions', 'videos'] as const;
 
 /** Whether `inner` is `outer` or a path below it. */
 function isWithin(inner: string, outer: string): boolean {
@@ -427,7 +433,7 @@ function nearestExisting(target: string): string | undefined {
 
 /**
  * Resolves the results directory, `--output` over the config's `output`,
- * from the project root. A run clears `<output>/artifacts` and writes over
+ * from the project root. A run clears `<output>/results` and writes over
  * its reports, so the directory must be one it can own: a directory (or a
  * path that does not exist yet) inside the project root and not the root
  * itself, not holding the directory a test glob scans, not the cache
@@ -457,7 +463,7 @@ function resolveOutput(
   const root = realpathOfExisting(projectRoot);
   const real = realpathOfExisting(output);
   const cache = realpathOfExisting(cacheDir);
-  if (real === root) refuse("is the project root; the run clears <output>/artifacts, so name a directory of its own, such as '.e2e'");
+  if (real === root) refuse("is the project root; the run clears <output>/results, so name a directory of its own, such as '.e2e'");
   if (!isWithin(real, root)) refuse(`is outside the project root ${projectRoot}; name a directory inside it`);
   const existing = nearestExisting(output);
   if (existing !== undefined && !statSync(existing).isDirectory()) {
@@ -579,13 +585,13 @@ interface RunRecording {
 }
 
 /**
- * The run's `trace` and `video` modes before any target speaks. A trace is
- * on by default locally and recorded on the first retry in CI, where a
- * trace of every attempt is the cost of a large share of the run.
+ * The run's `trace` and `video` modes before any target speaks. A failed
+ * attempt keeps its trace by default, locally and in CI alike: the trace is
+ * the runner's own text, cheap to write and worth reading on every failure.
  */
-function runRecordings(raw: E2EConfig, cli: CliOverrides, ci: boolean): Readonly<Record<RecordingKind, RunRecording>> {
+function runRecordings(raw: E2EConfig, cli: CliOverrides): Readonly<Record<RecordingKind, RunRecording>> {
   return {
-    trace: { cli: recordingMode(cli.trace, '--trace', 'trace'), config: recordingMode(raw.trace, 'trace', 'trace'), fallback: ci ? 'on-first-retry' : 'on' },
+    trace: { cli: recordingMode(cli.trace, '--trace', 'trace'), config: recordingMode(raw.trace, 'trace', 'trace'), fallback: 'retain-on-failure' },
     video: { cli: recordingMode(cli.video, '--video', 'video'), config: recordingMode(raw.video, 'video', 'video'), fallback: 'off' },
   };
 }
@@ -772,8 +778,15 @@ function resolveSecrets(
   checkEnvNameCollisions('E2E_USER', 'credentials', Object.keys(raw.credentials ?? {}));
   checkEnvNameCollisions('E2E_SECRET', 'secrets', Object.keys(raw.secrets ?? {}));
   for (const [name, credential] of Object.entries(raw.credentials ?? {})) {
+    checkCredentialShape(name, credential);
     const prefix = envName('E2E_USER', name);
     const username = env[`${prefix}_USERNAME`] ?? credential.username;
+    if (typeof username !== 'string') {
+      throw new ConfigurationError(
+        'INVALID_CONFIG',
+        `credential "${name}" has no username; set username or ${prefix}_USERNAME`,
+      );
+    }
     // An env override always wins, including over a provider: the operator
     // rotating a credential must not need to know how it was configured.
     const password = env[`${prefix}_PASSWORD`] ?? credential.password;
@@ -801,6 +814,37 @@ function resolveSecrets(
     allSecrets.set(name, secret);
   }
   return { credentials, secrets, allSecrets };
+}
+
+const CREDENTIAL_KEYS = new Set(['username', 'password']);
+
+/**
+ * A credential entry is `{ username, password }`, with `username` a plain
+ * string when set (`E2E_USER_<NAME>_USERNAME` may supply it): only
+ * `password` may be a provider function.
+ */
+function checkCredentialShape(name: string, credential: unknown): void {
+  if (!isRecord(credential)) {
+    throw new ConfigurationError(
+      'INVALID_CONFIG',
+      `credential "${name}" must be an object of { username, password }, got ${describeValue(credential)}`,
+    );
+  }
+  for (const key of Object.keys(credential)) {
+    if (!CREDENTIAL_KEYS.has(key)) {
+      throw new ConfigurationError(
+        'INVALID_CONFIG',
+        `unknown key "${key}" in credential "${name}"; a credential has username and password${didYouMean(key, [...CREDENTIAL_KEYS])}`,
+      );
+    }
+  }
+  const username = credential['username'];
+  if (username !== undefined && typeof username !== 'string') {
+    throw new ConfigurationError(
+      'INVALID_CONFIG',
+      `credential "${name}" username must be a string, got ${describeValue(username)}; only password may be a provider function`,
+    );
+  }
 }
 
 /**

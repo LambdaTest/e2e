@@ -28,6 +28,8 @@ const daemon = {
   onHeartbeat: undefined as (() => void) | undefined,
   onRelease: undefined as (() => void) | undefined,
   allocateError: undefined as Error | undefined,
+  /** A daemon older than `retainOnClose`: it grants the lease without saying it keeps it through session close. */
+  dropsRetainOnClose: false,
   /** Errors `release` answers with, in order, before it succeeds. */
   releaseErrors: [] as Error[],
   /** Errors `heartbeat` answers with, in order, before it succeeds. */
@@ -44,7 +46,14 @@ vi.mock('agent-device', () => ({
         if (gate !== undefined) await gate;
         daemon.onAllocate?.();
         if (daemon.allocateError !== undefined) throw daemon.allocateError;
-        return { leaseId: `lease-${daemon.calls.length}`, tenantId: options['tenant'], runId: options['runId'], backend: options['leaseBackend'], leaseProvider: options['leaseProvider'] };
+        return {
+          leaseId: `lease-${daemon.calls.length}`,
+          tenantId: options['tenant'],
+          runId: options['runId'],
+          backend: options['leaseBackend'],
+          leaseProvider: options['leaseProvider'],
+          ...(options['retainOnClose'] === true && !daemon.dropsRetainOnClose ? { retainOnClose: true } : {}),
+        };
       },
       heartbeat: async (options: Record<string, unknown>) => {
         daemon.calls.push({ config, operation: 'heartbeat', options });
@@ -82,6 +91,7 @@ beforeEach(() => {
     onHeartbeat: undefined,
     onRelease: undefined,
     allocateError: undefined,
+    dropsRetainOnClose: false,
     releaseErrors: [],
     heartbeatErrors: [],
   });
@@ -150,6 +160,7 @@ describe('testmu()', () => {
           providerBuild: 'run-1',
           providerSessionName: 'e2e-run-1-android-2',
           ttlMs: 10 * MINUTE,
+          retainOnClose: true,
         },
       },
     ]);
@@ -371,6 +382,16 @@ describe('testmu()', () => {
     });
     await expect(testmu(options).acquire(req)).rejects.toThrow('lease lease-1 was not handed to the run: reporter closed; releasing it failed (daemon gone)');
     expect(operations()).toEqual(['allocate', 'release']);
+  });
+
+  it('releases a lease the daemon would end when the worker closes its session, and says so', async () => {
+    daemon.dropsRetainOnClose = true;
+    const req = request();
+    await expect(testmu(options).acquire(req)).rejects.toThrow(
+      'lease lease-1 was not handed to the run: agent-device did not keep the lease through session close, so the session would end when a worker retires; use agent-device 0.21.25 or later; released it',
+    );
+    expect(operations()).toEqual(['allocate', 'release']);
+    expect(req.lines).toEqual([]);
   });
 
   it('passes an allocation failure through with nothing to release', async () => {

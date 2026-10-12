@@ -15,7 +15,7 @@ import { testmu, type TestmuOptions } from '../../src/index.ts';
 vi.mock('agent-device', () => ({
   createAgentDeviceClient: () => ({
     leases: {
-      allocate: async (options: Record<string, unknown>) => ({ leaseId: 'lease-1', tenantId: options['tenant'], runId: options['runId'] }),
+      allocate: async (options: Record<string, unknown>) => ({ leaseId: 'lease-1', tenantId: options['tenant'], runId: options['runId'], retainOnClose: options['retainOnClose'] }),
       heartbeat: async () => ({}),
       release: async () => ({ released: true }),
     },
