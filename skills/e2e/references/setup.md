@@ -1,5 +1,16 @@
 # Setting up e2e
 
+## Contents
+
+- Requirements
+- Scaffold
+- Subscriptions and API keys
+- The config
+- The app under test
+- Environment variables the runner reads
+- Mobile targets
+- Done when
+
 ## Requirements
 
 - Node.js 24.8 or newer, or 22.22.3 or newer on Node.js 22.
@@ -78,9 +89,11 @@ Switching to OpenCode Console: install `ai`, `@ai-sdk/openai-compatible`,
 `@ai-sdk/openai`, `@ai-sdk/anthropic`, and `@ai-sdk/google`, set
 `model: opencodeConsole('<id>')` from `e2e/oauth/opencode-console`, run
 `npx e2e login opencode-console`. A bare id is an OpenCode Zen model; a `go/` id
-(`go/deepseek-v4.1-flash`) is an OpenCode Go model and needs the workspace's Go
-subscription. `npx e2e models opencode-console` lists the ids, tagged Zen or Go. In CI,
-set a Console service account key as `OPENCODE_API_KEY`.
+(`go/deepseek-v4.1-flash`) is an OpenCode Go model and needs an OpenCode Go
+subscription: the workspace's through the login, or yours through
+`OPENCODE_API_KEY`. `npx e2e models opencode-console` lists
+the ids, tagged Zen or Go. In CI, set a Console service account API key or an OpenCode Go
+subscription API key as `OPENCODE_API_KEY`.
 
 ## The config
 
@@ -355,6 +368,12 @@ export default {
   `setPermission`, `setNetwork`, `setAppearance`, `clearKeychain`, `fold`
   for a foldable's hinge (iPhone Duo, Android foldable emulators), `locator`, more). Portable suites declare
   `requires: ['device']`.
+- `setNetwork('offline')` and `setAirplaneMode(true)` are Android only: on
+  iOS both are `UNSUPPORTED_CAPABILITY`, since a simulator shares the Mac's
+  network, and `setNetwork('online')` / `setAirplaneMode(false)` do nothing.
+  `setNetwork('offline')` turns off Wi-Fi alone and cellular stays up; an
+  offline test uses `setAirplaneMode(true)` (Android 11+) under
+  `platforms: ['android']` and turns it back off in `afterEach`.
 - No `state` capability: `test.setup` and `session` are unavailable; sign in
   per test with `screen` actions or `agent.act`, both fill a `Secret` (topic
   `writing-tests`, Sign-in sessions).
