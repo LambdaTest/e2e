@@ -33,6 +33,8 @@ Python suite needs a rewrite, so run both suites and move one flow at a time.
 
 </SetupPrompt>
 
+For a migration that spans several sessions, the [`migrate-to-e2e` skill](/coding-agents#migrate-an-existing-suite) records what moved in a progress file and keeps the old suite running until you retire each test.
+
 ## Port the config
 
 <Note>Install e2e with the [quickstart](/quickstart). Only agent calls need a model, so the example below runs without one.</Note>
@@ -97,7 +99,7 @@ password comes from [configured credentials](/authentication).
 | `.sendKeys(Keys.ENTER)` | `.press('Enter')` |
 | `.clear()` | `.clear()` |
 | `new Select(el).selectByVisibleText` | `.selectOption({ label })` |
-| `.getText()`, `.getAttribute()`, `.isDisplayed()` | `.textContent()`, `.getAttribute()`, `.isVisible()` read one time; `toHaveText()` retries |
+| `.getText()`, `.getAttribute()`, `.isDisplayed()` | `.textContent()`, `.getAttribute()` wait for the node then read one time, `.isVisible()` reads at once; `toHaveText()` retries |
 | `wait.until(visibilityOf(...))` | `await expect(locator).toBeVisible()` |
 | `wait.until(textToBe(...))` | `await expect(locator).toHaveText(...)` |
 | `wait.until(urlContains(...))` | `await expect(browser).toHaveURL(/.../)` |

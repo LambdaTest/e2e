@@ -14,10 +14,24 @@ and reading a failed run stay on the CLI (topics `running` and `debugging`).
 
 ## Setup
 
-The server ships with `e2e`. `e2e init` offers to register it; by hand:
+The server ships with the project's `e2e` dependency, separately from the
+skills-only plugin. `e2e init` offers to register it for Claude Code and
+Cursor. Reuse an existing registration; when adding one, use the project's
+config so it starts in the project it drives.
+
+Codex reads `.codex/config.toml` in a trusted project:
+
+```toml
+[mcp_servers.e2e]
+command = "npx"
+args = ["e2e", "mcp"]
+```
+
+`codex mcp list`, run in the project, shows the server. Start a new session
+after registering it so the tools load. Claude Code can register it with:
 
 ```bash
-claude mcp add e2e -- npx e2e mcp   # Claude Code
+claude mcp add --scope project e2e -- npx e2e mcp
 ```
 
 Or declare it in the client's project config (`.mcp.json` for Claude Code,
@@ -91,7 +105,11 @@ Resources: `e2e://guide` and `e2e://guide/<topic>` hold this skill.
 2. `call {tool: "locate", args: {...}}` for each locator you intend to write.
    One match: use the printed `screen.getByRole(...)` call. Zero or several:
    adjust before writing the test; the same failure would hit the test as
-   `LOCATOR_NOT_FOUND` or `LOCATOR_AMBIGUOUS`.
+   `LOCATOR_NOT_FOUND` or `LOCATOR_AMBIGUOUS`. A role query's `name` matches
+   the accessible name only, while `observe` shows a `status`, `alert`, or
+   `listitem` by its text: `status "Saved."` on an unlabelled status is its
+   text, so match it with `getByRole('status').filter({ hasText: 'Saved.' })`
+   or `getByText`.
 3. Write `tests/<feature>.e2e.ts` (topic `writing-tests`). Deterministic steps
    where you saw exact names; `agent.act` where the flow varies.
 4. Run it from the shell: `npx e2e run tests/<feature>.e2e.ts`, read the

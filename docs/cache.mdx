@@ -152,7 +152,8 @@ page on any other origin is another route.
   already on screen before the actions proves nothing. When the step's last
   action moved to another route, that move is the evidence.
 - An alert that the replay raised and the recording never saw stops the
-  replay.
+  replay. The web engine does not observe Next.js App Router's route
+  announcer, so its title echo never counts.
 - Text that differs on every run, such as a date, a duration, or an id,
   is skipped while a stable change exists. With nothing else, it is kept,
   and a changed value hands the replay off. In an alert, it reads as a placeholder.

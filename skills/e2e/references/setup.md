@@ -45,6 +45,11 @@ Gateway, installs the skill in `.agents/skills/` (`.claude/skills/e2e`
 symlinks to it), registers MCP in `.mcp.json` and `.cursor/mcp.json`, skips
 installing dependencies.
 
+The wizard needs a terminal: without one, `init` exits with code 2. From an
+agent's shell, run `npx e2e init --yes` when its defaults fit and install the
+dependencies after it, or install by hand (below). Neither registers the MCP
+server for Codex (topic `mcp`).
+
 Init adds dependencies and a `test:e2e` script to `package.json`, writes
 `e2e.config.ts` and `tests/example.e2e.ts`, updates `.gitignore`, leaves
 existing configs and tests alone. Re-run after upgrading to refresh skill and
@@ -91,9 +96,9 @@ Switching to OpenCode Console: install `ai`, `@ai-sdk/openai-compatible`,
 `npx e2e login opencode-console`. A bare id is an OpenCode Zen model; a `go/` id
 (`go/deepseek-v4.1-flash`) is an OpenCode Go model and needs an OpenCode Go
 subscription: the workspace's through the login, or yours through
-`OPENCODE_API_KEY`. `npx e2e models opencode-console` lists
-the ids, tagged Zen or Go. In CI, set a Console service account API key or an OpenCode Go
-subscription API key as `OPENCODE_API_KEY`.
+`OPENCODE_API_KEY`. `npx e2e models opencode-console` lists the ids, tagged
+Zen or Go, through the key when it is set. In CI, set a Console service account
+API key or an OpenCode Go subscription API key as `OPENCODE_API_KEY`.
 
 ## The config
 
@@ -194,13 +199,14 @@ start a script that brings them up and serves the app.
 
 | Option | Meaning |
 | --- | --- |
-| `browser` | `'chromium'` (default), `'firefox'`, `'webkit'`, or a `BrowserProvider` leasing hosted browsers over CDP (`kernel()` from `@e2e-dev/kernel`, `smol()` from `@e2e-dev/smol`, `testmuBrowsers()` from `@e2e-dev/testmu/web`, or your own), which implies chromium and excludes `connect`. Scope `'worker'` (default): one browser per worker slot from `prepare` to `finish`; `'attempt'`: one per attempt, with `reconnectEndpoint`'s limits. |
+| `browser` | `'chromium'` (default), `'firefox'`, `'webkit'`, or a `BrowserProvider` leasing hosted browsers over CDP (`kernel()` from `@e2e-dev/kernel`, `smol()` from `@e2e-dev/smol`, or your own), which implies chromium and excludes `connect`. Scope `'worker'` (default): one browser per worker slot from `prepare` to `finish`; `'attempt'`: one per attempt, with `reconnectEndpoint`'s limits. |
 | `viewport` | `{ width, height }`, default 1280x720; `null` follows the browser window (hosted live view, headed run). On a headed hosted browser (Kernel) use `null` and size the service's screen; a fixed size gives a smaller, unmaximized window. |
 | `connect` | `{ cdpEndpoint }` attaches to a remote Chromium over CDP; both it and `reconnectEndpoint` are resolvers `(signal) => url`, not strings. With `reconnectEndpoint` it rides one persistent default context and reconnects only to the original browser and page. |
 | `headers` | Sent to the app's site only (Vercel's `x-vercel-protection-bypass`, ngrok's `ngrok-skip-browser-warning`), `agent.act` included; disables the browser HTTP cache and service workers. |
 | `basicAuth` | `{ username, password }` for a `401` challenge; `password` may be `secrets.get('name')`, resolved per attempt and redacted like any secret, the base64 `Authorization` credential too. |
 | `userAgent` | The `User-Agent` every attempt sends and `navigator.userAgent` reports. |
 | `locale`, `timezoneId` | The language (`'de-DE'`: `navigator.language`, `Intl`, `Accept-Language`) and IANA time zone (`'Europe/Berlin'`) every attempt runs in. |
+| `colorScheme`, `reducedMotion` | The `prefers-color-scheme` (`'light'`, `'dark'`, `'no-preference'`) and `prefers-reduced-motion` (`'reduce'`, `'no-preference'`) every page reports to its `@media` rules and `matchMedia`, from first paint. |
 | `initScripts` | Scripts every document runs before the page's own: source, `{ path }`, or a function with no closures. |
 | `testIdAttribute` | What `getByTestId` reads; default `data-testid`. |
 | `screencast` | `{ size?, quality? }` for the engine's own video: frame size (default the viewport's), JPEG quality 0 to 100. |
@@ -348,18 +354,15 @@ export default {
 - `limrun()` from `@e2e-dev/limrun` leases one device per worker and installs
   `app.appPath` before tests. Set `LIMRUN_API_KEY`; install `@limrun/api` and
   matching `agent-device` peers. Android needs `adb` on `PATH` for its tunnel.
-  With agent-device 0.21.22, iOS keyboard actions such as `locator.press('Enter')`
-  return `UNSUPPORTED_CAPABILITY`; tap an app button when available.
+  iOS keyboard actions such as `locator.press('Enter')` return
+  `UNSUPPORTED_CAPABILITY`; tap an app button when available.
   See `examples/with-limrun` for the same form and restart tests on both platforms.
 - `testmu({ device, osVersion, app })` from `@e2e-dev/testmu` leases TestMu
   AI (formerly LambdaTest) emulators, simulators, or real devices
   (`deviceType: 'real'`); `device` and `osVersion` match its catalog
-  exactly, TestMu AI installs `app` (omit `app.appPath`), it reads
-  `LT_USERNAME` and `LT_ACCESS_KEY`, and needs `agent-device` at
-  `@e2e-dev/mobile`'s version with `agent-device plugins add
-  @agent-device/testmu` run once per machine (a daemon already running
-  loads it only after `agent-device daemon stop`).
-  An attempt's video links TestMu AI's recording of the whole session.
+  exactly, TestMu AI installs `app` (omit `app.appPath`), and it reads
+  `LT_USERNAME` and `LT_ACCESS_KEY`. An attempt's video links TestMu AI's
+  recording of the whole session.
 - Only a control that appeared or moved with the previous action waits out
   `transition` (default 500 ms); agent actions settle `settle` ms (default
   150) before the next observation, `settle: false` skips it.
