@@ -143,7 +143,8 @@ the same video. Runs that overlap and share a fixed `build` and
 - If the runner is killed before it releases a device, nothing sends the
   session another command, so TestMu AI's
   [idle timeout](https://www.lambdatest.com/support/docs/desired-capabilities-in-appium/)
-  ends it 120 seconds after its last command.
+  (120 seconds by default) ends it, which takes about three minutes after its
+  last command.
 - Device settings (permissions, location, network, appearance), system
   alerts, recording and device logs through agent-device, and port reverse
   are not available. Read logs on the TestMu AI dashboard, and use TestMu AI
