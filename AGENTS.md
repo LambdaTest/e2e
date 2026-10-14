@@ -123,11 +123,8 @@ suites that consume the built packages the way a user would.
   config load, and renders the page with `renderMarkdownReport` from `e2e`.
 - `packages/testmu` — the published `@e2e-dev/testmu` package: TestMu AI
   (formerly LambdaTest) hosted Android emulators, iOS simulators, and real
-  devices for the mobile engine (`DeviceProvider`). agent-device's
-  `@agent-device/testmu` plugin is the vendor client: the package
-  allocates agent-device leases from a daemon it starts per run, so
-  `agent-device` (which must be the same copy `@e2e-dev/mobile` uses) and
-  `@e2e-dev/mobile` are its peers.
+  devices for the mobile engine (`DeviceProvider`), through agent-device's
+  `@agent-device/testmu` plugin.
 - `apps/testbed` (`@e2e-dev/testbed`, private) — dogfood project that
   consumes the **built** packages like a real user would: the playground app
   where every runner feature (sessions, routes, downloads, frames, uploads,
