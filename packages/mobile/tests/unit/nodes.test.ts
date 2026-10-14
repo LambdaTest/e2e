@@ -222,20 +222,7 @@ describe('snapshot projection', () => {
     const webDriver = native.map((node) => ({ ...node, type: `XCUIElementType${node.type}` }));
     const kindsAndRoles = (nodes: readonly RawNode[]) => project(nodes).index.map((entry) => [entry.kind, entry.node.role]);
     expect(kindsAndRoles(webDriver)).toEqual(kindsAndRoles(native));
-    const projected = project(webDriver);
-    expect(projected.index.map((entry) => entry.kind)).toEqual([
-      'application',
-      'navigation-bar',
-      'static-text',
-      'button',
-      'text-view',
-      'tab-bar',
-      'button',
-      'button',
-    ]);
-    expect(projected.index.map((entry) => entry.node.role)).toEqual(['application', 'navigation', 'text', 'button', 'textbox', 'tablist', 'tab', 'tab']);
-    expect(projected.viewport).toEqual({ width: 390, height: 844 });
-    expect(screenTitle(projected)).toBe('Profiler');
+    expect(project(webDriver).viewport).toEqual({ width: 390, height: 844 });
   });
 
   it('maps iOS composite widgets onto the vocabulary roles a browser reports for them', () => {

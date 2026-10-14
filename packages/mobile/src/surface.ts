@@ -49,6 +49,7 @@ import { pointerInteraction, DEFAULT_LONG_PRESS_MS } from './actions.ts';
 import { resolveExpression } from './locate.ts';
 import {
   isWithin,
+  normalizeKind,
   projectSnapshot,
   ROOT_ID,
   screenRoot,
@@ -154,7 +155,7 @@ const KEYBOARD_DRAG_RATIO = 0.03;
 function keyboardShowing(raw: RawSnapshot): boolean {
   if (raw.keyboard?.kind === 'visible') return true;
   if (raw.keyboard?.kind === 'absent') return false;
-  return (raw.nodes ?? []).some((node) => KEYBOARD_TYPES.has((node.type ?? '').toLowerCase()));
+  return (raw.nodes ?? []).some((node) => KEYBOARD_TYPES.has(normalizeKind(node.type ?? '')));
 }
 
 /**

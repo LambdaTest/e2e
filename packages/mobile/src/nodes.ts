@@ -247,7 +247,7 @@ function isAndroidClass(type: string | undefined): boolean {
 }
 
 /** One element-type spelling for `NavigationBar`, `XCUIElementTypeNavigationBar`, `navigation-bar`, and `android.widget.NavigationBar` alike. */
-function normalizeKind(type: string): string {
+export function normalizeKind(type: string): string {
   const simple = type.slice(type.lastIndexOf('.') + 1).replace(/^XCUIElementType(?=[A-Z])/, '');
   return simple
     .replaceAll(/([a-z0-9])([A-Z])/g, '$1-$2')
