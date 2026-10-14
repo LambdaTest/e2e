@@ -605,6 +605,13 @@ importers:
         version: 5.0.1(@types/node@26.6.2)(vite@8.1.5(@types/node@26.6.2)(esbuild@0.28.2)(jiti@1.21.7)(terser@5.51.2)(tsx@4.23.14)(yaml@2.9.0))
 
   packages/testmu:
+    dependencies:
+      '@agent-device/testmu':
+        specifier: 0.21.25
+        version: 0.21.25
+      agent-device:
+        specifier: 0.21.25
+        version: 0.21.25(ai@7.0.134(zod@4.6.1))
     devDependencies:
       '@e2e-dev/mobile':
         specifier: workspace:*
@@ -612,9 +619,6 @@ importers:
       '@types/node':
         specifier: 26.6.2
         version: 26.6.2
-      agent-device:
-        specifier: 0.21.25
-        version: 0.21.25(ai@7.0.134(zod@4.6.1))
       e2e:
         specifier: workspace:*
         version: link:../e2e
@@ -651,6 +655,9 @@ importers:
         version: 5.0.1(@types/node@26.6.2)(vite@8.1.5(@types/node@26.6.2)(esbuild@0.28.2)(jiti@1.21.7)(terser@5.51.2)(tsx@4.23.13)(yaml@2.9.0))
 
 packages:
+
+  '@agent-device/testmu@0.21.25':
+    resolution: {integrity: sha512-4MVbZpKqLpvNdOdPTJHb4lbBfzc4hWblBF1lTyqfp353GjR67dpHTZjU1RVLemg6z4cKeFa0euJGhZXZhyENQg==}
 
   '@ai-sdk/anthropic@4.0.58':
     resolution: {integrity: sha512-vhXKBz7jnIhBlOoj2d0joyHicWISuIxDNha65SLrAnagAkVgulLoZBRLZRazstxlO/BtXU+cDERe1opVKte2OQ==}
@@ -8005,6 +8012,8 @@ packages:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
 
 snapshots:
+
+  '@agent-device/testmu@0.21.25': {}
 
   '@ai-sdk/anthropic@4.0.58(zod@4.6.1)':
     dependencies:

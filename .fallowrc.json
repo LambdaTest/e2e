@@ -37,7 +37,8 @@
     "@openrouter/ai-sdk-provider",
     "@expo/fingerprint",
     "@expo/repack-app",
-    "@oxc-project/runtime"
+    "@oxc-project/runtime",
+    "@agent-device/testmu"
   ],
   "rules": {
     "unused-class-member": "warn",

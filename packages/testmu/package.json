@@ -56,26 +56,20 @@
   },
   "peerDependencies": {
     "@e2e-dev/mobile": ">=0.11.1 <1",
-    "agent-device": ">=0.21.25 <1",
     "e2e": ">=0.15.0 <1"
-  },
-  "peerDependenciesMeta": {
-    "@e2e-dev/mobile": {
-      "optional": true
-    },
-    "agent-device": {
-      "optional": true
-    }
   },
   "devDependencies": {
     "@e2e-dev/mobile": "workspace:*",
     "@types/node": "26.6.2",
-    "agent-device": "0.21.25",
     "e2e": "workspace:*",
     "typescript": "7.0.2",
     "vitest": "5.0.1"
   },
   "engines": {
     "node": "^22.22.3 || >=24.8.0"
+  },
+  "dependencies": {
+    "@agent-device/testmu": "0.21.25",
+    "agent-device": "0.21.25"
   }
 }
