@@ -145,8 +145,10 @@ the same video. Runs that overlap and share a fixed `build` and
   seconds, and is billed until the run releases it, even when no test runs
   on it. Keep `workers` times the number of TestMu AI targets within your
   plan's parallel sessions.
-- If the runner is killed before it releases a device, the session runs
-  until TestMu AI's idle timeout ends it.
+- If the runner is killed before it releases a device, nothing sends the
+  session another command, so TestMu AI's
+  [idle timeout](https://www.lambdatest.com/support/docs/desired-capabilities-in-appium/)
+  ends it 120 seconds after its last command.
 - Device settings (permissions, location, network, appearance), system
   alerts, recording and device logs through agent-device, and port reverse
   are not available. Read logs on the TestMu AI dashboard, and use TestMu AI
