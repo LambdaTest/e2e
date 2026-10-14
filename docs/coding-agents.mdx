@@ -90,13 +90,16 @@ test('a signed-in user reaches checkout', async ({ screen, app, agent }) => {
   await screen.getByRole('button', 'Sign in').click();
   await expect(screen.getByRole('heading', 'Welcome back')).toBeVisible();
 
-  await agent.act('Add the cheapest item on the page to the cart and open the cart');
+  await agent.act('Add the cheapest item on the page to the cart');
+  await expect(screen.getByRole('status', 'Cart')).toHaveText('1 item');
+  await agent.act('Open the cart');
   await expect(screen.getByRole('heading', 'Your cart')).toBeVisible();
 });
 ```
 
-- **One `agent.act` per goal, then an `expect`.** The `expect` fails when
-  the agent did the wrong thing. A locator matcher, or another
+- **One `agent.act` per [atomic goal](/core-concepts#goals), then an
+  `expect`.** The `expect` fails when the agent did the wrong thing. A
+  locator matcher, or another
   [verification check](/cache#when-a-recording-is-written), also lets the
   cache replay the step.
 - **No sleeps.** Locators poll, actions wait for their target, and `expect`

@@ -85,8 +85,9 @@ import { expect } from 'e2e';
 describe('todos', () => {
   test('completes one', async ({ app, agent, screen }) => {
     await app.open('/todos');
-    await agent.act('add todos "Buy milk" and "Walk the dog", then complete "Buy milk"');
+    await agent.act('add todos "Buy milk" and "Walk the dog"');
     await expect(screen.getByTestId('todo')).toHaveCount(2);
+    await agent.act('complete "Buy milk"');
     await expect(screen.getByText('1 item left')).toBeVisible();
   });
 });

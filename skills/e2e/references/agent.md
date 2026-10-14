@@ -85,9 +85,12 @@ context, so each persona records and replays its own steps.
 ## act: one goal
 
 ```ts
-import { credentials } from 'e2e';
+import { credentials, expect } from 'e2e';
 
-await agent.act('add a todo named "Buy milk" and mark it done');
+await agent.act('add a todo named "Buy milk"');
+await expect(screen.getByRole('listitem', 'Buy milk')).toBeVisible();
+await agent.act('mark the "Buy milk" todo as done');
+await expect(screen.getByRole('checkbox', 'Buy milk')).toBeChecked();
 await agent.act('invite {email} as an editor', { params: { email: 'ada@example.test' } });
 
 const member = credentials.user('member');
@@ -206,6 +209,28 @@ masked pixels fail with `POLICY_DENIED`.
 ## Write instructions the model can execute
 
 - One goal per `act`; goal order is the test's, the path the model's.
+- Keep each goal atomic: one outcome that one check confirms. When two
+  parts of an instruction each leave a state worth checking, they are two
+  goals: give each its own `act` and check. Steps toward a single outcome
+  are the path, not more goals: scrolling to a control, closing a banner,
+  opening the menu that holds it, filling the fields of one form.
+- A split flow fails at the goal that broke. Each goal replays from its own
+  recording and gets its own `maxSteps` and `maxModelCalls`; the test
+  timeout still caps them all.
+
+```ts
+// BAD: three goals in one instruction, one recording, no check between them.
+await agent.act('open the Pro plan, set the seats to {seats}, and check out', { params: { seats: 3 } });
+
+// GOOD: three atomic goals, each pinned before the next.
+await agent.act('open the Pro plan');
+await expect(screen.getByRole('heading', 'Pro plan')).toBeVisible();
+await agent.act('set the seats to {seats}', { params: { seats: 3 } });
+await expect(screen.getByRole('status', 'Seats')).toHaveText('3 seats');
+await agent.act('check out');
+await expect(screen.getByText('Order confirmed')).toBeVisible();
+```
+
 - Use the words on screen: `'open the Billing tab'`, not `'upgrade'`.
 - Values go in `params`, never expanded: `act('rename to {name}', { params })`.
 - Do not describe mechanics the runner handles: waiting, scrolling, retries.
@@ -276,7 +301,9 @@ matches. Misses and hand-offs use the model; `agent.assert`,
   every control that appeared (with its checked or selected state) is
   there, every one that went away is gone, at least one of those changed
   during the replay, and no new alert showed; otherwise the agent takes
-  over mid-step. Entries are keyed per agent and per `agentContext`. `step.cache.reason` says why: `no-entry`,
+  over mid-step. The web engine does not observe Next.js App Router's route
+  announcer, so its title echo never counts. Entries are keyed per agent and
+  per `agentContext`. `step.cache.reason` says why: `no-entry`,
   `wrong-context`, `target-not-found`, `target-ambiguous`, `end-mismatch`,
   and so on.
 - A step recording no actions, or changing nothing on screen or in the
