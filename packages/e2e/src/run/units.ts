@@ -131,6 +131,20 @@ export function failureLimitSkip(failures: number, limit: number): SkipInfo {
   };
 }
 
+/** A run's time limit, in milliseconds, and where it was set: the `--max-duration` flag or the config's `maxDuration`. */
+export interface TimeLimit {
+  readonly ms: number;
+  readonly source: '--max-duration' | 'maxDuration';
+}
+
+/** Skip info for the work a run stopped at its time limit never started. */
+export function timeLimitSkip(limit: TimeLimit): SkipInfo {
+  return {
+    cause: 'time-limit',
+    reason: `run stopped at its time limit of ${limit.ms} ms (${limit.source})`,
+  };
+}
+
 /**
  * The skip for work an interrupt reached before it started: the skip the
  * interrupt carried as its reason (a run stopped at its failure limit says
@@ -139,6 +153,16 @@ export function failureLimitSkip(failures: number, limit: number): SkipInfo {
 export function interruptedSkip(signal: AbortSignal, fallback: SkipInfo = INTERRUPTED_BEFORE_START): SkipInfo {
   const reason: unknown = signal.reason;
   return isSkipInfo(reason) ? reason : fallback;
+}
+
+/**
+ * The message of an attempt an interrupt cut short in `phase`, naming the
+ * limit that stopped the run when the interrupt carried one.
+ */
+export function interruptedInPhase(signal: AbortSignal, phase: string): string {
+  const reason: unknown = signal.reason;
+  const message = `run interrupted in phase ${phase}`;
+  return isSkipInfo(reason) ? `${message}: ${reason.reason}` : message;
 }
 
 function isSkipInfo(value: unknown): value is SkipInfo {

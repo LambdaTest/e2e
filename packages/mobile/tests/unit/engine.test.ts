@@ -1360,6 +1360,24 @@ describe('device fixture', () => {
       expect(h.fake.calls.filter((call) => call.method === 'interactions.swipe')).toHaveLength(1);
     });
 
+    it('reads an XCUIElementTypeKeyboard from a WebDriver session as a shown keyboard', async () => {
+      const h = harness();
+      await openAttempt(h);
+      await observed(h, 'Back');
+      const device = fixture(h);
+      h.fake.respond('command.keyboard', NO_DISMISS_KEY);
+      const withKeys = {
+        ...SETTINGS_SNAPSHOT,
+        nodes: [
+          ...SETTINGS_NODES,
+          { ref: '@e20', index: 10, parentIndex: 0, depth: 1, type: 'XCUIElementTypeKeyboard', rect: { x: 0, y: 583, width: 390, height: 261 } },
+        ],
+      };
+      captures(h, [withKeys, SETTINGS_SNAPSHOT]);
+      await device.dismissKeyboard();
+      expect(h.fake.calls.filter((call) => call.method === 'interactions.swipe')).toHaveLength(1);
+    });
+
     it('retries a sparse capture instead of reading it as a dismissed keyboard', async () => {
       autoAdvanceTimers();
       const h = harness();
