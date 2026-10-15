@@ -11,7 +11,7 @@ import { SoftFailures } from '../expect/soft.ts';
 import type { DebugTrace } from '../internal/debug.ts';
 import { classifyError, ConfigurationError, InfrastructureError, serializeError, TestTimeoutError, type SerializedError } from '../internal/errors.ts';
 import { resultId, timestamp, uuidv7 } from '../internal/ids.ts';
-import { Deadline, withTimeout } from '../internal/time.ts';
+import { Deadline, MAX_TIMER_MS, withTimeout } from '../internal/time.ts';
 import { attemptVideo } from '../internal/recording-modes.ts';
 import type { TestFixtures } from '../types.ts';
 import { createAttemptArtifacts, resultSegment } from './artifacts.ts';
@@ -88,9 +88,6 @@ export interface AttemptReservation {
 export interface AttemptClosed {
   readonly cleanup: AttemptRecord['cleanup'];
 }
-
-/** Longest delay `setTimeout` honors; a longer deadline needs no timer the attempt could outlive. */
-const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /**
  * Validates the options and publishes a hosted attempt, synchronously, so
@@ -180,16 +177,22 @@ export async function launchAttempt(
     await closeOpened({ status: 'failed', cleanup: 'complete' });
     throw cause;
   }
+  const { deadline } = budget;
+  let timedOut = false;
+  /** Fails the attempt as timed out, once, and cuts whatever is still in flight. */
+  const expire = (): void => {
+    if (timedOut) return;
+    timedOut = true;
+    const timeout = new TestTimeoutError(`session timed out after ${options.timeoutMs} ms`);
+    recordFailure(timeout, 'body');
+    end.abort(timeout);
+  };
   // An engine that ignores its operation's timeout, or a model call, must not
   // outlive the deadline: the attempt is cut the way a run's body is. One
   // tick after it, so an operation that honors the deadline reports its own
   // failure first; whatever is still in flight then fails as timed out.
-  const remaining = budget.deadline.remaining() + 1;
-  const expiry = remaining > MAX_TIMER_MS ? undefined : setTimeout(() => {
-    const timedOut = new TestTimeoutError(`session timed out after ${options.timeoutMs} ms`);
-    recordFailure(timedOut, 'body');
-    end.abort(timedOut);
-  }, remaining);
+  const remaining = deadline.remaining() + 1;
+  const expiry = remaining > MAX_TIMER_MS ? undefined : setTimeout(expire, remaining);
   expiry?.unref();
   const startedAt = timestamp();
   const startedMs = Date.now();
@@ -198,6 +201,8 @@ export async function launchAttempt(
   const close = (): Promise<readonly SerializedError[]> => {
     ending ??= (async () => {
       clearTimeout(expiry);
+      // The deadline decides the outcome, not whether the timer ran before close.
+      if (deadline.expired()) expire();
       const abandonedPoll = polls.close();
       const abandonedStep = steps.abandonRunning();
       end.abort();
