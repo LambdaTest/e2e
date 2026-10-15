@@ -16,6 +16,7 @@
  * `undefined`, never as a repaired or partially trusted entry.
  */
 
+import { isKeyModifier, KEY_MODIFIERS, type KeyModifier } from '../engine/contract.ts';
 import { timestamp } from '../internal/ids.ts';
 import type { ScrollDirection } from '../types.ts';
 import { bound } from '../internal/text.ts';
@@ -175,6 +176,12 @@ export type NodeActionName = (typeof NODE_ACTION_NAMES)[number];
 
 const isNodeActionName = oneOf(NODE_ACTION_NAMES);
 
+/** The node verbs that click: the only ones that may hold key modifiers. */
+const TAP_ACTION_NAMES = ['tap', 'doubleTap', 'secondaryTap'] as const satisfies readonly NodeActionName[];
+
+/** Whether a node verb clicks, so it may carry `modifiers`. */
+export const isTapActionName = oneOf(TAP_ACTION_NAMES);
+
 /**
  * Whether an action is one of the node verbs. The every-layer switches over
  * an action union (prose, recording, templating, replay) take these six
@@ -187,6 +194,8 @@ export function isNodeAction<A extends { readonly name: string }>(action: A): ac
 export interface NodeAction extends ActionBase {
   readonly name: NodeActionName;
   readonly target: TraceTargetDescriptor;
+  /** Keys a tap-family action held for the click; replayed with the action. */
+  readonly modifiers?: readonly KeyModifier[];
 }
 
 export interface TypeAction extends ActionBase {
@@ -572,6 +581,17 @@ function readAnchors(document: unknown): TraceTargetDescriptor[] | undefined {
   return each(document, readDescriptor);
 }
 
+/** The `modifiers` of a recorded tap-family action: a non-empty list of distinct key modifiers, or undefined when malformed. */
+function readModifiers(document: unknown): readonly KeyModifier[] | undefined {
+  if (!Array.isArray(document) || document.length === 0 || document.length > KEY_MODIFIERS.length) return undefined;
+  const modifiers: KeyModifier[] = [];
+  for (const value of document) {
+    if (!isKeyModifier(value) || modifiers.includes(value)) return undefined;
+    modifiers.push(value);
+  }
+  return modifiers;
+}
+
 function readRecordedAction(document: unknown): RecordedAction | undefined {
   if (typeof document !== 'object' || document === null || Array.isArray(document)) {
     return undefined;
@@ -583,7 +603,10 @@ function readRecordedAction(document: unknown): RecordedAction | undefined {
   const name = raw['name'];
   if (isNodeActionName(name)) {
     const target = readDescriptor(raw['target']);
-    return target === undefined ? undefined : { name, summary, target };
+    if (target === undefined) return undefined;
+    if (raw['modifiers'] === undefined) return { name, summary, target };
+    const modifiers = isTapActionName(name) ? readModifiers(raw['modifiers']) : undefined;
+    return modifiers === undefined ? undefined : { name, summary, target, modifiers };
   }
   switch (name) {
     case 'type': {

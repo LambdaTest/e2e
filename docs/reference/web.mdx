@@ -136,6 +136,14 @@ export interface WebOptions {
 /** JavaScript source, a file relative to the project root, or a function. */
 export type WebInitScript = string | { readonly path: string } | (() => unknown);
 
+/** HTTP basic authentication the browser answers a `401` challenge with. */
+export interface WebBasicAuth {
+  /** The user name; `:` is not allowed in one (RFC 7617). */
+  readonly username: string;
+  /** The password, or `secrets.get(name)` for one in `config.secrets`. */
+  readonly password: string | Secret;
+}
+
 /** The engine's screencast of the page: the frame size and the JPEG quality of the frames it encodes. */
 export interface WebScreencastOptions {
   /** Frame size in pixels; default the viewport's, or the window's under `viewport: null`. A smaller size makes a smaller file. */
@@ -341,6 +349,10 @@ export interface Browser extends Expectable<BrowserExpectation> {
   readonly keyboard: {
     /** Sends one key. */
     press(key: string): Promise<void>;
+    /** Holds one key until up; repeated down calls send a repeat event. */
+    down(key: string): Promise<void>;
+    /** Releases a held key. */
+    up(key: string): Promise<void>;
     /** Types plain text. */
     type(text: string): Promise<void>;
   };
@@ -632,9 +644,9 @@ page it opens. Each defaults to the browser's own.
 every open tab and every tab opened after them, through `app.restart()` and
 `app.clearState()`. It works before the first navigation, so the next
 `app.open` loads with them. A feature it leaves out keeps its value. A tab
-the app opens itself paints with the configured values and gets a test's
-change as it appears, on a persistent context too. A
-feature or value outside `WebMedia` is `INVALID_CONFIG` in `web()` and
+the app opens itself gets a test's change as it appears, on a persistent
+context too, so a script it runs at load may still read the configured
+values. A feature or value outside `WebMedia` is `INVALID_CONFIG` in `web()` and
 `INVALID_ARGUMENT` in `emulateMedia`.
 
 ```ts
@@ -734,7 +746,7 @@ cannot reuse node IDs or publish handles over a newer observation.
 
 ## Exported types
 
-`WebOptions`, `WebMedia`, `WebScreencastOptions`, `WebConnectOptions`, `WebBasicAuth`, `BrowserName`,
+`WebOptions`, `WebMedia`, `WebScreencastOptions`, `WebConnectOptions`, `WebBasicAuth`, `WebInitScript`, `BrowserName`,
 `BrowserProvider`, `BrowserProviderScope`, `BrowserRequest`, `BrowserLease`,
 `BrowserReleaseContext`, `BrowserProviderDownloads`, `BrowserDownloadContext`,
 `PlaywrightLiveSurface`, `Browser`, `FrameScreen`,
