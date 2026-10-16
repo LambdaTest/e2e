@@ -3,12 +3,13 @@
 import { discoverConfig, loadConfigModule, missingConfigError } from '../config/load.ts';
 import { resolveConfig, type ResolvedConfig } from '../config/resolve.ts';
 import { classifyError, ConfigurationError, E2EError, serializeError, type SerializedError } from '../internal/errors.ts';
-import type { E2EConfig, TestFixtures } from '../types.ts';
+import type { E2EConfig, Report, TestFixtures } from '../types.ts';
 import { allocateTargetPorts } from './app-ports.ts';
 import { processSecrets, registerStaticSecrets } from './secrecy.ts';
 import { selectTarget } from './select-target.ts';
 import { openStandaloneHost } from './standalone.ts';
 import type { StepProgress, StepRecord } from './steps.ts';
+import { reserveHostedRun } from './public-ownership.ts';
 
 export interface OpenHostOptions {
   /** Config search directory, or project root of a config value; default `process.cwd()`. */
@@ -59,6 +60,8 @@ export interface E2ESession<Fixtures extends object = Record<string, unknown>> e
   /** Absolute per-session trace path. Written before close settles successfully. */
   readonly tracePath: string;
   steps(): readonly StepRecord[];
+  /** The session Report after close and a successful trace write; otherwise undefined. */
+  report(): Report | undefined;
   /** Idempotent. Returns soft assertion, abandoned-operation, and cleanup failures. Disposal throws them as AggregateError. */
   close(): Promise<readonly SerializedError[]>;
 }
@@ -72,37 +75,50 @@ export async function openHost<Fixtures extends object = Record<string, unknown>
 
 /** Loads the selected target and opens its worker behind the redacted public boundary. */
 async function openHostWorker<Fixtures extends object>(options: OpenHostOptions): Promise<E2EHost<Fixtures>> {
-  const cwd = options.cwd ?? process.cwd();
-  const env = options.env ?? process.env;
-  const loaded = await loadHostConfig(cwd, options.config, env);
-  registerStaticSecrets(loaded.allSecrets);
-  const { config, target } = await allocateTargetPorts(loaded, selectTarget(loaded, options.target, 'pass `target` to openHost'));
-  const host = await openStandaloneHost({
-    config, target, headed: options.headed ?? false, env,
-    signal: options.signal ?? new AbortController().signal,
-    ...(options.onNotice === undefined ? {} : { notice: options.onNotice }),
-  });
-  return {
-    runId: host.runId, target: target.name, close: host.close,
-    [Symbol.asyncDispose]: () => dispose(host.close, 'host'),
-    openSession: (sessionOptions) => redactOpening(async () => {
-      if (typeof sessionOptions.name !== 'string') throw new ConfigurationError('INVALID_CONFIG', 'a hosted session requires a string name');
-      const attempt = await host.openAttempt({
-        name: sessionOptions.name,
-        signal: sessionOptions.signal ?? new AbortController().signal,
-        timeoutMs: sessionOptions.timeout ?? config.timeout,
-        agent: sessionOptions.agent,
-        ...(sessionOptions.onStep === undefined ? {} : { onProgress: sessionOptions.onStep }),
-      });
-      return {
-        runId: attempt.runId, attemptId: attempt.attemptId, target: target.name,
-        fixtures: attempt.fixtures as TestFixtures & Fixtures,
-        artifactsDir: attempt.artifactsDir, tracePath: attempt.tracePath,
-        steps: () => attempt.steps.all(), close: attempt.close,
-        [Symbol.asyncDispose]: () => dispose(attempt.close, 'session'),
-      };
-    }),
-  };
+  const release = reserveHostedRun();
+  try {
+    const cwd = options.cwd ?? process.cwd();
+    const env = options.env ?? process.env;
+    const loaded = await loadHostConfig(cwd, options.config, env);
+    registerStaticSecrets(loaded.allSecrets);
+    const { config, target } = await allocateTargetPorts(loaded, selectTarget(loaded, options.target, 'pass `target` to openHost'));
+    const host = await openStandaloneHost({
+      config, target, headed: options.headed ?? false, env,
+      signal: options.signal ?? new AbortController().signal,
+      ...(options.onNotice === undefined ? {} : { notice: options.onNotice }),
+    });
+    const close = async (): Promise<readonly SerializedError[]> => {
+      try {
+        return await host.close();
+      } finally {
+        release();
+      }
+    };
+    return {
+      runId: host.runId, target: target.name, close,
+      [Symbol.asyncDispose]: () => dispose(close, 'host'),
+      openSession: (sessionOptions) => redactOpening(async () => {
+        if (typeof sessionOptions.name !== 'string') throw new ConfigurationError('INVALID_CONFIG', 'a hosted session requires a string name');
+        const attempt = await host.openAttempt({
+          name: sessionOptions.name,
+          signal: sessionOptions.signal ?? new AbortController().signal,
+          timeoutMs: sessionOptions.timeout ?? config.timeout,
+          agent: sessionOptions.agent,
+          ...(sessionOptions.onStep === undefined ? {} : { onProgress: sessionOptions.onStep }),
+        });
+        return {
+          runId: attempt.runId, attemptId: attempt.attemptId, target: target.name,
+          fixtures: attempt.fixtures as TestFixtures & Fixtures,
+          artifactsDir: attempt.artifactsDir, tracePath: attempt.tracePath,
+          steps: () => attempt.steps.all(), report: attempt.report, close: attempt.close,
+          [Symbol.asyncDispose]: () => dispose(attempt.close, 'session'),
+        };
+      }),
+    };
+  } catch (cause) {
+    release();
+    throw cause;
+  }
 }
 
 /** Opening errors go straight to the external runner, never through a report writer. */

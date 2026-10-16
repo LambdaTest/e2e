@@ -3,6 +3,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import type { ResolvedConfig, ResolvedTarget } from '../config/resolve.ts';
+import type { Report } from '../types.ts';
 import { buildReport } from '../report/build.ts';
 import { renderTracePage } from '../report/failure-text.ts';
 import { outcome } from '../report/outcome.ts';
@@ -26,8 +27,8 @@ export interface HostTraceOptions {
   readonly redact: (text: string) => string;
 }
 
-/** Writes one session's trace page as a single-result run, so it reads like `e2e run`'s. */
-export async function writeHostTrace(options: HostTraceOptions): Promise<void> {
+/** Writes one session's trace page as a single-result run and returns its Report. */
+export async function writeHostTrace(options: HostTraceOptions): Promise<Report> {
   const { config, attempt, title } = options;
   const status = attempt.status;
   const result: ResultRecord = {
@@ -50,4 +51,5 @@ export async function writeHostTrace(options: HostTraceOptions): Promise<void> {
     },
   });
   await writeTextReport(options.tracePath, options.redact(page));
+  return report;
 }
