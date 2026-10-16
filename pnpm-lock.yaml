@@ -225,6 +225,9 @@ importers:
 
   apps/testbed:
     dependencies:
+      '@e2e-dev/lightpanda':
+        specifier: workspace:*
+        version: link:../../packages/lightpanda
       '@e2e-dev/web':
         specifier: workspace:*
         version: link:../../packages/web
@@ -318,8 +321,8 @@ importers:
         specifier: 0.11.1
         version: 0.11.1
       agent-device:
-        specifier: 0.21.25
-        version: 0.21.25(ai@7.0.134(zod@4.6.1))
+        specifier: 0.21.28
+        version: 0.21.28(ai@7.0.134(zod@4.6.1))
       ai:
         specifier: 7.0.134
         version: 7.0.134(zod@4.6.1)
@@ -533,11 +536,29 @@ importers:
         specifier: 5.0.1
         version: 5.0.1(@types/node@26.6.2)(vite@8.1.5(@types/node@26.6.2)(esbuild@0.28.2)(jiti@1.21.7)(terser@5.51.2)(tsx@4.23.14)(yaml@2.9.0))
 
+  packages/lightpanda:
+    devDependencies:
+      '@e2e-dev/web':
+        specifier: workspace:*
+        version: link:../web
+      '@types/node':
+        specifier: 26.6.2
+        version: 26.6.2
+      e2e:
+        specifier: workspace:*
+        version: link:../e2e
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
+      vitest:
+        specifier: 5.0.1
+        version: 5.0.1(@types/node@26.6.2)(vite@8.1.5(@types/node@26.6.2)(esbuild@0.28.2)(jiti@1.21.7)(terser@5.51.2)(tsx@4.23.14)(yaml@2.9.0))
+
   packages/limrun:
     dependencies:
       agent-device:
-        specifier: 0.21.25
-        version: 0.21.25(ai@7.0.134(zod@4.6.1))
+        specifier: 0.21.28
+        version: 0.21.28(ai@7.0.134(zod@4.6.1))
     devDependencies:
       '@e2e-dev/mobile':
         specifier: workspace:*
@@ -561,8 +582,8 @@ importers:
   packages/mobile:
     dependencies:
       agent-device:
-        specifier: 0.21.25
-        version: 0.21.25(ai@7.0.107(zod@4.6.1))
+        specifier: 0.21.28
+        version: 0.21.28(ai@7.0.107(zod@4.6.1))
       pngjs:
         specifier: 7.0.0
         version: 7.0.0
@@ -613,11 +634,11 @@ importers:
   packages/testmu:
     dependencies:
       '@agent-device/testmu':
-        specifier: 0.21.25
-        version: 0.21.25
+        specifier: 0.21.28
+        version: 0.21.28
       agent-device:
-        specifier: 0.21.25
-        version: 0.21.25(ai@7.0.134(zod@4.6.1))
+        specifier: 0.21.28
+        version: 0.21.28(ai@7.0.134(zod@4.6.1))
     devDependencies:
       '@e2e-dev/mobile':
         specifier: workspace:*
@@ -662,8 +683,8 @@ importers:
 
 packages:
 
-  '@agent-device/testmu@0.21.25':
-    resolution: {integrity: sha512-4MVbZpKqLpvNdOdPTJHb4lbBfzc4hWblBF1lTyqfp353GjR67dpHTZjU1RVLemg6z4cKeFa0euJGhZXZhyENQg==}
+  '@agent-device/testmu@0.21.28':
+    resolution: {integrity: sha512-yZ3fZHcPfOgJnLldXwbtR2AUeLJkLPxN2OW4Xi4Idn9HFiImWgWHXAzsu/tFSbKFkEWF0po8mq3G5FUBXvNuig==}
 
   '@ai-sdk/anthropic@4.0.58':
     resolution: {integrity: sha512-vhXKBz7jnIhBlOoj2d0joyHicWISuIxDNha65SLrAnagAkVgulLoZBRLZRazstxlO/BtXU+cDERe1opVKte2OQ==}
@@ -3613,8 +3634,8 @@ packages:
     engines: {node: '>=18.18'}
     hasBin: true
 
-  agent-device@0.21.25:
-    resolution: {integrity: sha512-JFmAD5AqM03dVU6BVQW1DQ2Kz+MThmbCYBbDxpGw2lka91LcoXHdrb4IjF9NNg4DEQUu41Pg8WnB/7crM3ig2w==}
+  agent-device@0.21.28:
+    resolution: {integrity: sha512-uGEENVhPzSpIACrVlt16O1mloODWJyAemTCT0boDb4L006JXN2rG747u1TRoQJudOpdP/Pm2urxNRHeECLMLfg==}
     engines: {node: '>=22.12'}
     hasBin: true
     peerDependencies:
@@ -8029,7 +8050,7 @@ packages:
 
 snapshots:
 
-  '@agent-device/testmu@0.21.25': {}
+  '@agent-device/testmu@0.21.28': {}
 
   '@ai-sdk/anthropic@4.0.58(zod@4.6.1)':
     dependencies:
@@ -11251,11 +11272,11 @@ snapshots:
 
   agent-cli-detector@0.1.7: {}
 
-  agent-device@0.21.25(ai@7.0.107(zod@4.6.1)):
+  agent-device@0.21.28(ai@7.0.107(zod@4.6.1)):
     optionalDependencies:
       ai: 7.0.107(zod@4.6.1)
 
-  agent-device@0.21.25(ai@7.0.134(zod@4.6.1)):
+  agent-device@0.21.28(ai@7.0.134(zod@4.6.1)):
     optionalDependencies:
       ai: 7.0.134(zod@4.6.1)
 
