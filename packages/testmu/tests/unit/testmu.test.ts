@@ -46,7 +46,7 @@ function request(overrides: Partial<DeviceRequest> = {}): DeviceRequest & { line
     slot: 0,
     slots: 2,
     app: 'com.example.app',
-    agentDeviceVersion: '0.21.25',
+    agentDeviceVersion: '0.21.28',
     projectRoot: ROOT,
     env,
     signal: new AbortController().signal,
@@ -70,7 +70,7 @@ describe('testmu()', () => {
 
   it("checks agent-device against the engine's before anything starts", async () => {
     mocks.version.mockImplementationOnce(() => {
-      throw new Error('@e2e-dev/testmu uses agent-device 0.21.25, but @e2e-dev/mobile uses 0.21.30. Install matching versions.');
+      throw new Error('@e2e-dev/testmu uses agent-device 0.21.28, but @e2e-dev/mobile uses 0.21.30. Install matching versions.');
     });
     await expect(testmu(options).acquire(request({ agentDeviceVersion: '0.21.30' }))).rejects.toThrow(/Install matching versions/);
     expect(mocks.version).toHaveBeenCalledWith('0.21.30');
